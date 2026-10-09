@@ -127,6 +127,13 @@ scripts/      equivalence checks, netem helper, later deployment and benchmarks
 tests/
 ```
 
+## Known limitations and next optimisations
+
+- **Kernel-launch overhead.** On a consumer GPU under Windows, a decode step is dominated by the cost of launching thousands of small kernels: an E2B step does about 12 ms of GPU work but takes about 74 ms. Capturing each stage's step as a **CUDA graph**, with a static KV cache, is the planned fix.
+- **Sliding-window layers keep their whole history,** so rollback is always exact. They could keep only the window plus the draft length.
+- **bf16 speculative output can part from plain output at near-ties** (see above). Batch-invariant kernels would remove this.
+- **The client calls peers one after another.** Relaying peer to peer would halve the network legs per trip.
+
 ## Prior work
 
 Layer-sharded inference across machines is well established ([Petals](https://github.com/bigscience-workshop/petals), [exo](https://github.com/exo-explore/exo)). Speculative decoding over a pipeline of machines has been studied in [PipeInfer](https://arxiv.org/abs/2407.11798) and [FlowSpec](https://arxiv.org/abs/2507.02620). Myriad's focus is an open swarm of untrusted peers, with incentives and with the client keeping the output head.
