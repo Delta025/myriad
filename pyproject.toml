@@ -11,7 +11,15 @@ dependencies = [
     "transformers>=5.19",
     "safetensors>=0.6",
     "huggingface-hub>=1.0",
+    "websockets>=17.2",
+    "msgpack>=1.2.3",
+    "fastapi>=0.143.0",
+    "uvicorn>=0.54.0",
+    "httpx>=0.28.1",
 ]
+
+[project.scripts]
+myriad = "myriad.cli:main"
 
 [dependency-groups]
 dev = [

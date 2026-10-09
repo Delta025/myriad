@@ -81,3 +81,68 @@ def make_tiny_checkpoint(path: Path, variant: str, seed: int = 0) -> Path:
 
     model.save_pretrained(path)
     return path
+
+
+class ThreadedSwarm:
+    """A tracker and peers on localhost, served from one background event loop, for tests.
+
+    Real deployments run each peer as its own process (`myriad peer`); the
+    protocol and code paths are the same.
+    """
+
+    def __init__(self, checkpoint, split, model: str, dtype=torch.float32, delays_ms=None):
+        import asyncio
+        import socket
+        import threading
+        import time
+
+        import httpx
+        import uvicorn
+
+        from myriad.model.checkpoint import Checkpoint
+        from myriad.model.stage import Stage
+        from myriad.peer.server import PeerServer
+        from myriad.tracker.app import create_app
+
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True, name="swarm").start()
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.tracker_url = f"http://127.0.0.1:{port}"
+        self._uvicorn = uvicorn.Server(uvicorn.Config(create_app(), host="127.0.0.1", port=port, log_level="warning"))
+        self._tasks = [asyncio.run_coroutine_threadsafe(self._uvicorn.serve(), self.loop)]
+        while not self._uvicorn.started:
+            time.sleep(0.01)
+
+        ckpt = Checkpoint(checkpoint)
+        delays_ms = delays_ms or [0.0] * len(split)
+        self.peers = [
+            PeerServer(Stage.from_checkpoint(ckpt, a, b, "cpu", dtype), model, region=f"r{i}", delay_ms=d)
+            for i, ((a, b), d) in enumerate(zip(split, delays_ms))
+        ]
+        for peer in self.peers:
+            self._tasks.append(asyncio.run_coroutine_threadsafe(peer.serve(tracker_url=self.tracker_url), self.loop))
+
+        deadline = time.monotonic() + 30
+        while len(httpx.get(f"{self.tracker_url}/peers").json()) < len(self.peers):
+            if time.monotonic() > deadline:
+                raise TimeoutError("peers did not register with the tracker")
+            time.sleep(0.05)
+
+    def close(self) -> None:
+        import concurrent.futures
+
+        self._uvicorn.should_exit = True
+        for task in self._tasks[1:]:
+            task.cancel()
+        # Let the tasks finish their cleanup before stopping the loop.
+        concurrent.futures.wait(self._tasks, timeout=10)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()

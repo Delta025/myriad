@@ -57,24 +57,24 @@ def validate_split(config, split: Split) -> None:
                 )
 
 
-def even_split(config, n_stages: int) -> Split:
-    """Cut the model into `n_stages` stages of roughly equal layer counts, respecting the KV-sharing block.
+def even_split(config, n_stages: int, start: int = 0, end: int | None = None) -> Split:
+    """Cut layers ``[start, end)`` into `n_stages` stages of roughly equal size, respecting the KV-sharing block.
 
     The KV-sharing block counts as a single unit, so a stage that contains it may be larger.
     """
-    n_layers = config.num_hidden_layers
+    end = config.num_hidden_layers if end is None else end
     block = unsplittable_block(config)
-    cut_points = [i for i in range(1, n_layers) if block is None or not (block[0] < i < block[1])]
+    cut_points = [i for i in range(start + 1, end) if block is None or not (block[0] < i < block[1])]
     if n_stages - 1 > len(cut_points):
-        raise ValueError(f"cannot cut {n_layers} layers into {n_stages} stages")
+        raise ValueError(f"cannot cut layers {start}-{end - 1} into {n_stages} stages")
 
     chosen: list[int] = []
     for k in range(1, n_stages):
-        target = k * n_layers / n_stages
-        best = min((c for c in cut_points if c not in chosen and (not chosen or c > chosen[-1])), key=lambda c: abs(c - target))
-        chosen.append(best)
+        target = start + k * (end - start) / n_stages
+        remaining = n_stages - 1 - k  # cuts still needed after this one
+        options = [c for c in cut_points if (not chosen or c > chosen[-1])]
+        options = options[: len(options) - remaining] if remaining else options
+        chosen.append(min(options, key=lambda c: abs(c - target)))
 
-    bounds = [0, *chosen, n_layers]
-    split = list(zip(bounds[:-1], bounds[1:]))
-    validate_split(config, split)
-    return split
+    bounds = [start, *chosen, end]
+    return list(zip(bounds[:-1], bounds[1:]))

@@ -17,8 +17,8 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | --- | --- |
 | Project skeleton, tiny random-weight Gemma 4 test models | Done |
 | Run a model as a chain of layer-range stages, with a cache that can roll back | **Done.** Bit-identical to Transformers on Gemma 4 E2B and E4B |
-| Stages on separate peers over the network, tracker | Next |
-| Speculative decoding across the swarm | Planned |
+| Stages on separate peers over the network, tracker | **Done.** Bit-identical to the in-process pipeline |
+| Speculative decoding across the swarm | Next |
 | Tit-for-tat credits | Planned |
 | Live dashboard | Planned |
 | Multi-region deployment and benchmarks | Planned |
@@ -39,6 +39,14 @@ Two details were needed for bit-exact results:
 
 E2B and E4B share key/value state between their last ~20 layers, so those layers must stay in one stage. Split validation enforces this. Gemma 4 31B has no such constraint.
 
+Stages can also run on separate peers:
+
+- Each peer is a process that serves a range of layers over WebSockets. Messages are msgpack, and tensors travel as raw bytes, so they arrive bit-identical.
+- Peers register with a tracker. The client asks the tracker for a route of peers covering the layers it doesn't run itself.
+- The client runs the embedding, its own first (and optionally last) layers and the output head. It calls the peers one after another and times every hop.
+- A swarm of three peer processes produces tokens and logits bit-identical to the in-process pipeline, on tiny models in the tests and on Gemma 4 E2B on an RTX 3080.
+- Peers can add a simulated round-trip delay (`--delay-ms`) for latency experiments. `scripts/netem.sh` adds real delay on Linux.
+
 ## Development
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
@@ -56,19 +64,37 @@ To check a real model against Transformers (downloads the weights from Hugging F
 uv run python scripts/check_equivalence.py google/gemma-4-E4B-it --stages 3
 ```
 
+## Running a swarm
+
+```bash
+uv run myriad tracker --port 8000
+uv run myriad peer google/gemma-4-E2B-it --layers 1:13 --port 9001 --tracker http://127.0.0.1:8000
+uv run myriad peer google/gemma-4-E2B-it --layers 13:35 --port 9002 --tracker http://127.0.0.1:8000
+uv run myriad generate google/gemma-4-E2B-it --tracker http://127.0.0.1:8000 --prompt "Why is the sky blue?"
+```
+
+Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
+
+To check that a swarm of local peer processes matches the in-process pipeline exactly:
+
+```bash
+uv run python scripts/check_network.py google/gemma-4-E2B-it --peers 3 --delay-ms 20
+```
+
 ## Layout
 
 ```
 src/myriad/
   model/      checkpoint loading, split rules, stages, KV cache, masks, embedding/head, pipelines
-  client/     generation loops (speculative decoding to come)
-  peer/       peer server (to come)
-  tracker/    peer registry and route selection (to come)
-  protocol/   wire messages (to come)
+  client/     generation loops, RemotePipeline (client side of a swarm); speculative decoding to come
+  peer/       peer server: one stage, one KV cache per session
+  tracker/    peer registry, route selection, event stream for the dashboard
+  protocol/   wire messages (msgpack, raw tensor bytes)
   ledger/     identities, receipts, credits (to come)
   dashboard/  live web view (to come)
-  testing.py  tiny random-weight Gemma 4 checkpoints
-scripts/      equivalence check, later deployment and benchmarks
+  cli.py      `myriad tracker | peer | generate`
+  testing.py  tiny random-weight Gemma 4 checkpoints, in-process test swarm
+scripts/      equivalence checks, netem helper, later deployment and benchmarks
 tests/
 ```
 
