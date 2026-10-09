@@ -50,6 +50,7 @@ def run_generate(args) -> None:
     from myriad.client.drafters import ModelDrafter, MTPDrafter
     from myriad.client.generate import generate
     from myriad.client.remote import RemotePipeline
+    from myriad.client.reporting import Reporter
     from myriad.client.sampling import Sampling
     from myriad.client.speculative import speculative_generate
     from myriad.model.checkpoint import Checkpoint
@@ -78,25 +79,23 @@ def run_generate(args) -> None:
     sampling = Sampling(args.temperature, args.top_k, args.top_p)
     generator = torch.Generator().manual_seed(args.seed)
 
-    def report_round(r, produced):
-        # counts and timings only: the tracker never sees the text
-        pipe.events.emit(
-            {"type": "speculation", "time": time.time(), "client_id": pipe.client_id, "session": pipe.session,
-             "proposed": r.proposed, "accepted": r.accepted, "produced": len(produced),
-             "draft_ms": round(r.draft_ms, 2), "verify_ms": round(r.verify_ms, 2)}
-        )
+    reporter = Reporter(pipe, args.name or args.model, tokenizer, share_text=args.share_text)
 
     with pipe:
         eos = GenerationConfig.from_pretrained(checkpoint.path).eos_token_id
         stop = eos if isinstance(eos, list) else [eos]
         t = time.perf_counter()
+        stats = None
         if drafter is None:
-            tokens = generate(pipe, prompt, args.max_tokens, sampling, stop, generator)
+            reporter.start("plain")
+            tokens = generate(pipe, prompt, args.max_tokens, sampling, stop, generator, on_token=reporter.on_token)
         else:
+            reporter.start("speculative", args.k)
             tokens, stats = speculative_generate(
-                pipe, drafter, prompt, args.max_tokens, args.k, sampling, stop, generator, on_round=report_round
+                pipe, drafter, prompt, args.max_tokens, args.k, sampling, stop, generator, on_round=reporter.on_round
             )
         elapsed = time.perf_counter() - t
+        reporter.finish(tokens, elapsed, stats)
     print(tokenizer.decode(tokens, skip_special_tokens=True))
     print()
     print(f"{len(tokens)} tokens in {elapsed:.1f}s ({len(tokens) / elapsed:.1f} tok/s)")
@@ -169,6 +168,10 @@ def main(argv=None) -> None:
     p.add_argument("--top-k", type=int, default=0)
     p.add_argument("--top-p", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--share-text", action="store_true",
+        help="send the generated text to the tracker so the dashboard can show it (off by default)",
+    )
     p.set_defaults(func=run_generate)
 
     args = parser.parse_args(argv)

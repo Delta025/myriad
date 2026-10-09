@@ -142,6 +142,7 @@ class PeerServer:
             "url": self.url,
             "region": self.region,
             "gpu": gpu,
+            "num_layers": self.stage.config.num_hidden_layers,
         }
         async with httpx.AsyncClient(base_url=tracker_url, timeout=5.0) as http:
             registered = False

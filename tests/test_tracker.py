@@ -47,3 +47,10 @@ def test_events_are_stored_and_streamed():
         client.post("/events", json=[{"type": "forward", "n": 1}])
         assert ws.receive_json() == {"type": "forward", "n": 1}
     assert client.get("/events").json()[-1] == {"type": "forward", "n": 1}
+
+
+def test_dashboard_is_served():
+    client, _ = client_with(peer("a", 0, 4) | {"num_layers": 8})
+    page = client.get("/")
+    assert page.status_code == 200 and "<title>Myriad swarm</title>" in page.text
+    assert client.get("/peers").json()[0]["num_layers"] == 8

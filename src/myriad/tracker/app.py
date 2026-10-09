@@ -3,7 +3,8 @@
 It never sees prompts or activations, only which peer serves which layers,
 plus timing events for the dashboard.
 
-POST /register        peer info: peer_id, model, start, end, url, region, gpu
+GET  /                the live dashboard
+POST /register        peer info: peer_id, model, start, end, url, region, gpu, num_layers
 POST /heartbeat       {peer_id, sessions}; 404 if the tracker doesn't know the peer
 GET  /peers           live peers
 GET  /route           ?model=&start=&end=: peers whose layer ranges chain exactly from start to end
@@ -16,9 +17,13 @@ import asyncio
 import random
 import time
 from collections import deque
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+
+DASHBOARD = Path(__file__).parent.parent / "dashboard" / "index.html"
 
 PEER_TIMEOUT_SECONDS = 15.0  # three missed heartbeats
 EVENT_HISTORY = 2000
@@ -32,6 +37,7 @@ class PeerInfo(BaseModel):
     url: str
     region: str = ""
     gpu: str = ""
+    num_layers: int = 0  # layers in the whole model, for the dashboard's coverage bar
 
 
 class Heartbeat(BaseModel):
@@ -85,6 +91,10 @@ def create_app(tracker: Tracker | None = None) -> FastAPI:
     tracker = tracker or Tracker()
     app = FastAPI(title="Myriad tracker")
     app.state.tracker = tracker
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard():
+        return DASHBOARD.read_text(encoding="utf-8")
 
     @app.post("/register")
     async def register(info: PeerInfo):

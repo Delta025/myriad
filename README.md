@@ -20,8 +20,8 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | Stages on separate peers over the network, tracker | **Done.** Bit-identical to the in-process pipeline |
 | Speculative decoding across the swarm | **Done.** Up to 1.97x faster under latency, same output |
 | Official Gemma 4 multi-token-prediction drafter | **Done.** Runs entirely on the client |
-| Live dashboard | Next |
-| Tit-for-tat credits | Planned |
+| Live dashboard | **Done** |
+| Tit-for-tat credits | Next |
 | Multi-region deployment and benchmarks | Planned |
 
 ### What works today
@@ -119,6 +119,20 @@ Add `--draft google/gemma-4-E2B-it --k 4` (or `--mtp <drafter> --last-layers <n>
 
 Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
 
+### Dashboard
+
+The tracker serves a live dashboard at its root URL (for example http://127.0.0.1:8000/). It shows:
+
+- the latest request moving from the client through each peer and back, with per-hop round-trip and compute times
+- which peers serve which layers
+- tokens per second, acceptance rate and tokens per trip, with recent runs compared against plain decoding
+- the token stream, colored by draft tokens accepted, tokens corrected by the swarm, and bonus tokens
+- the peers with their region and GPU
+
+By default the client sends the tracker only counts and timings. Pass `--share-text` to `generate` to show the text too: whoever runs the tracker can then read the output.
+
+To try it on one machine, `uv run python scripts/local_swarm.py google/gemma-4-E2B-it --peers 2 --delay-ms 40` starts a tracker and peers. The dashboard is then at http://127.0.0.1:8765/.
+
 To check that a swarm of local peer processes matches the in-process pipeline exactly:
 
 ```bash
@@ -141,7 +155,7 @@ src/myriad/
   tracker/    peer registry, route selection, event stream for the dashboard
   protocol/   wire messages (msgpack, raw tensor bytes)
   ledger/     identities, receipts, credits (to come)
-  dashboard/  live web view (to come)
+  dashboard/  live web view, served by the tracker
   cli.py      `myriad tracker | peer | generate`
   testing.py  tiny random-weight Gemma 4 checkpoints, in-process test swarm
 scripts/      equivalence checks, netem helper, later deployment and benchmarks

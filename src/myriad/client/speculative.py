@@ -102,7 +102,8 @@ def speculative_generate(
 ) -> tuple[list[int], SpeculationStats]:
     """Generate up to `max_new_tokens` tokens. Returns the new tokens and statistics.
 
-    `on_round` is called after each round with its statistics and the tokens it produced.
+    `on_round` is called after each round with its statistics and the tokens it produced,
+    and once before the first round for the token that follows the prompt (with no guesses).
     """
     stats = SpeculationStats()
     t_start = time.perf_counter()
@@ -112,6 +113,8 @@ def speculative_generate(
     seq = list(prompt) + [pick(logits[-1], sampling, generator)]
     out = seq[len(prompt) :]
     done = out[-1] in stop_ids
+    if on_round is not None:  # the prefill's token: no guesses involved, not counted as a round
+        on_round(Round(proposed=0, accepted=0, draft_ms=0.0, verify_ms=stats.prefill_ms), out[:])
 
     while not done and len(out) < max_new_tokens:
         # A round yields up to k + 1 tokens; don't guess past the limit.
