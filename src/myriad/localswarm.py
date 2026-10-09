@@ -3,6 +3,7 @@
 Each peer is a real `myriad peer` process, as it would be on separate machines.
 """
 
+import socket
 import subprocess
 import sys
 import time
@@ -14,8 +15,17 @@ TRACKER_PORT, FIRST_PEER_PORT = 8765, 9765
 TRACKER_URL = f"http://127.0.0.1:{TRACKER_PORT}"
 
 
+def _port_in_use(port: int) -> bool:
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 class LocalSwarm:
     def __init__(self, model: str, split: list[tuple[int, int]], log_dir: Path, delay_ms: float = 0.0, timeout: float = 300):
+        ports = [TRACKER_PORT, *(FIRST_PEER_PORT + i for i in range(len(split)))]
+        if busy := [port for port in ports if _port_in_use(port)]:
+            # Most likely a swarm left behind by a crashed run; using it by accident would skew results.
+            raise RuntimeError(f"ports {busy} are already in use; stop the leftover `myriad` processes first")
         cli = [sys.executable, "-m", "myriad.cli"]
         self.log_dir = log_dir
         self.procs: list[subprocess.Popen] = []
@@ -51,7 +61,11 @@ class LocalSwarm:
 
     def close(self) -> None:
         for p in self.procs:
-            p.terminate()
+            if sys.platform == "win32":
+                # A venv's python.exe is a launcher that runs the real interpreter as a child: kill the tree.
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+            else:
+                p.terminate()
         for p in self.procs:
             p.wait(timeout=30)
 

@@ -119,6 +119,8 @@ class RemotePipeline:
         self.client_id = client_id or uuid.uuid4().hex[:8]
         self.session = uuid.uuid4().hex
         self.length = 0
+        self.last_hidden: torch.Tensor | None = None
+        self.last_start_pos = 0
 
         config = embedder.config
         split = [(p.start, p.end) for p in peers]
@@ -131,6 +133,22 @@ class RemotePipeline:
         for peer in peers:
             peer.call({"type": "open_session", "session": self.session, "client_id": self.client_id})
 
+    @staticmethod
+    def load_client_parts(
+        checkpoint: Checkpoint, first_layers: int = 1, last_layers: int = 0, dtype: torch.dtype = torch.bfloat16,
+        stage_device: str = "cpu", ends_device: str = "cpu",
+    ) -> dict:
+        """Load what the client runs itself: embedding, head, and its first and last layers."""
+        n_layers = checkpoint.text_config().num_hidden_layers
+        start, end = first_layers, n_layers - last_layers
+        embedder = Embedder.from_checkpoint(checkpoint, ends_device, dtype)
+        return dict(
+            embedder=embedder,
+            head=Head.from_checkpoint(checkpoint, ends_device, dtype, embedder=embedder),
+            first=Stage.from_checkpoint(checkpoint, 0, start, stage_device, dtype) if start > 0 else None,
+            last=Stage.from_checkpoint(checkpoint, end, n_layers, stage_device, dtype) if end < n_layers else None,
+        )
+
     @classmethod
     def connect(
         cls,
@@ -142,11 +160,13 @@ class RemotePipeline:
         dtype: torch.dtype = torch.bfloat16,
         stage_device: str = "cpu",
         ends_device: str = "cpu",
+        parts: dict | None = None,
     ) -> "RemotePipeline":
         """Load the client's parts of `checkpoint` and ask the tracker for peers covering the rest.
 
         `model` is the name peers registered under (default: the checkpoint argument).
         Keeping last layers on E2B/E4B means keeping their whole KV-sharing block.
+        `parts` (from `load_client_parts`) reuses already-loaded client weights for a new session.
         """
         if not isinstance(checkpoint, Checkpoint):
             model = model or str(checkpoint)
@@ -163,11 +183,8 @@ class RemotePipeline:
 
         client_id = uuid.uuid4().hex[:8]
         peers = [PeerLink(hop["url"], client_id) for hop in route.json()]
-        embedder = Embedder.from_checkpoint(checkpoint, ends_device, dtype)
-        head = Head.from_checkpoint(checkpoint, ends_device, dtype, embedder=embedder)
-        first = Stage.from_checkpoint(checkpoint, 0, start, stage_device, dtype) if start > 0 else None
-        last = Stage.from_checkpoint(checkpoint, end, n_layers, stage_device, dtype) if end < n_layers else None
-        return cls(embedder, head, first, last, peers, EventSink(tracker_url), client_id)
+        parts = parts or cls.load_client_parts(checkpoint, first_layers, last_layers, dtype, stage_device, ends_device)
+        return cls(parts["embedder"], parts["head"], parts["first"], parts["last"], peers, EventSink(tracker_url), client_id)
 
     def forward(self, token_ids, start_pos: int) -> torch.Tensor:
         if start_pos > self.length:
@@ -205,7 +222,9 @@ class RemotePipeline:
         if self.last is not None:
             stage = self.last.stage
             hidden = stage(hidden, start_pos, self.last.cache, stage_inputs(stage.start, stage.end))
-        logits = self.head(hidden)[0].float().cpu()
+        normed = self.head.normalize(hidden)
+        self.last_hidden, self.last_start_pos = normed[0], start_pos
+        logits = self.head.project(normed)[0].float().cpu()
         self.length = start_pos + ids.shape[1]
 
         self.events.emit(
@@ -229,6 +248,13 @@ class RemotePipeline:
         for peer in self.peers:
             peer.call({"type": "truncate", "session": self.session, "length": length})
         self.length = min(self.length, length)
+
+    def cached_kv(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """K/V of a layer the client runs itself (peers' caches stay on the peers)."""
+        for part in (self.first, self.last):
+            if part is not None and part.stage.start <= layer_idx < part.stage.end:
+                return part.cache.layer(layer_idx)
+        raise KeyError(f"layer {layer_idx} runs on a peer, not on the client")
 
     def close(self) -> None:
         for peer in self.peers:

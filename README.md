@@ -19,9 +19,9 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | Run a model as a chain of layer-range stages, with a cache that can roll back | **Done.** Bit-identical to Transformers on Gemma 4 E2B and E4B |
 | Stages on separate peers over the network, tracker | **Done.** Bit-identical to the in-process pipeline |
 | Speculative decoding across the swarm | **Done.** Up to 1.97x faster under latency, same output |
-| Official Gemma 4 multi-token-prediction drafter | Next |
+| Official Gemma 4 multi-token-prediction drafter | **Done.** Runs entirely on the client |
+| Live dashboard | Next |
 | Tit-for-tat credits | Planned |
-| Live dashboard | Planned |
 | Multi-region deployment and benchmarks | Planned |
 
 ### What works today
@@ -83,6 +83,27 @@ Benchmark on one RTX 3080: Gemma 4 E2B as the target, split over 2 peer processe
 
 The more latency between peers, the more speculation helps, because it removes round trips.
 
+#### The official Gemma 4 drafter
+
+Google publishes a small multi-token-prediction drafter for each Gemma 4 model (`google/gemma-4-31B-it-assistant` and so on). It has no key/value cache of its own. Each guess reads:
+
+- the target's embedding of the last token
+- the target's final hidden state
+- the target's cached keys and values of its last sliding-window layer and last global layer
+
+On 31B those are layers 58 and 59, which the client runs anyway, so the drafter needs nothing from the peers. Myriad feeds these inputs to Transformers' drafter module exactly as Transformers' own assisted generation does; a test checks the guesses match. Use it with `--mtp google/gemma-4-31B-it-assistant --last-layers 2`.
+
+Results on the RTX 3080 with Gemma 4 E4B as the target (2 peer processes) and its 150 MB drafter. On E4B, the drafter's source layers sit in the block of layers that share key/value state, so for this test the client runs layers 22–41.
+
+| Latency per peer | Plain | MTP drafter, k=2 |
+| --- | --- | --- |
+| 0 ms | 6.34 tok/s | 6.79 tok/s (1.07x) |
+| 20 ms | 5.05 tok/s | 5.73 tok/s (1.14x) |
+| 50 ms | 3.87 tok/s | 4.75 tok/s (1.23x) |
+| 100 ms | 2.76 tok/s | 3.62 tok/s (1.31x) |
+
+The small E4B drafter guesses right less often than E2B drafting for itself: 1.57 tokens per trip against 3.0. Transformers' own assisted generation gets 1.64 with the same drafter and prompt. Each guess, though, costs about 10 ms instead of about 70 ms. Measurements with 31B and its larger drafter are next.
+
 About exactness: speculative greedy output is identical to plain greedy output in float32, on the tiny test models and on E2B (`scripts/check_chunking.py`). In bfloat16, checking `k+1` tokens in one call rounds slightly differently from one token at a time, so the two can part where the top two tokens are tied within bf16 noise. In the k=4 runs above that happened once, at token 11, where " dances" and " intricate" were 0.016 apart.
 
 ## Running a swarm
@@ -94,7 +115,7 @@ uv run myriad peer google/gemma-4-E2B-it --layers 13:35 --port 9002 --tracker ht
 uv run myriad generate google/gemma-4-E2B-it --tracker http://127.0.0.1:8000 --prompt "Why is the sky blue?"
 ```
 
-Add `--draft google/gemma-4-E2B-it --k 4` to `generate` for speculative decoding, and `--temperature`, `--top-p`, `--top-k`, `--seed` for sampling.
+Add `--draft google/gemma-4-E2B-it --k 4` (or `--mtp <drafter> --last-layers <n>`) to `generate` for speculative decoding, and `--temperature`, `--top-p`, `--top-k`, `--seed` for sampling.
 
 Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
 

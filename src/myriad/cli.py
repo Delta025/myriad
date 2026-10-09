@@ -4,6 +4,7 @@
     myriad peer google/gemma-4-E2B-it --layers 1:13 --port 9001 --tracker http://127.0.0.1:8000
     myriad generate google/gemma-4-E2B-it --tracker http://127.0.0.1:8000 --prompt "Hello"
     myriad generate google/gemma-4-31B-it --tracker ... --draft google/gemma-4-E2B-it --k 4 --prompt "Hello"
+    myriad generate google/gemma-4-31B-it --tracker ... --last-layers 2 --mtp google/gemma-4-31B-it-assistant --prompt "Hello"
 """
 
 import argparse
@@ -46,7 +47,7 @@ def run_peer(args) -> None:
 def run_generate(args) -> None:
     from transformers import AutoTokenizer, GenerationConfig
 
-    from myriad.client.drafters import ModelDrafter
+    from myriad.client.drafters import ModelDrafter, MTPDrafter
     from myriad.client.generate import generate
     from myriad.client.remote import RemotePipeline
     from myriad.client.sampling import Sampling
@@ -65,6 +66,8 @@ def run_generate(args) -> None:
         # the draft runs once per guessed token, so its head goes on the GPU too (PLE table stays in RAM)
         draft = LocalPipeline.from_checkpoint(args.draft, None, DTYPES[args.dtype], device, device, ple_device="cpu")
         drafter = ModelDrafter(draft)
+    elif args.mtp:
+        drafter = MTPDrafter.from_pretrained(pipe, args.mtp, device)
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint.path)
     prompt = tokenizer.apply_chat_template(
@@ -154,7 +157,13 @@ def main(argv=None) -> None:
     p.add_argument("--device", help="device for the client's layers (default: cuda if available)")
     p.add_argument("--ends-device", default="cpu", help="device for embedding and output head")
     p.add_argument("--dtype", choices=DTYPES, default="bfloat16")
-    p.add_argument("--draft", help="draft model for speculative decoding, e.g. google/gemma-4-E2B-it")
+    draft = p.add_mutually_exclusive_group()
+    draft.add_argument("--draft", help="draft model for speculative decoding, e.g. google/gemma-4-E2B-it")
+    draft.add_argument(
+        "--mtp",
+        help="Gemma 4 MTP drafter, e.g. google/gemma-4-31B-it-assistant; needs the target's last sliding and "
+        "global layers on the client (--last-layers 2 on 31B)",
+    )
     p.add_argument("--k", type=int, default=4, help="tokens drafted per round")
     p.add_argument("--temperature", type=float, default=0.0, help="0 = greedy")
     p.add_argument("--top-k", type=int, default=0)

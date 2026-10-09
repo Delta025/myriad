@@ -83,6 +83,44 @@ def make_tiny_checkpoint(path: Path, variant: str, seed: int = 0) -> Path:
     return path
 
 
+@torch.no_grad()
+def make_tiny_assistant(path: Path, variant: str, seed: int = 0) -> Path:
+    """A tiny random Gemma 4 MTP drafter whose K/V shapes match the tiny `variant` target."""
+    from transformers import Gemma4AssistantConfig, Gemma4AssistantForCausalLM
+
+    target = VARIANTS[variant]
+    text = Gemma4TextConfig(
+        vocab_size=TINY_VOCAB,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        layer_types=["sliding_attention", "full_attention"],
+        num_attention_heads=2,
+        num_key_value_heads=target["num_key_value_heads"],
+        num_global_key_value_heads=target.get("num_global_key_value_heads"),
+        attention_k_eq_v=target["attention_k_eq_v"],
+        head_dim=target["head_dim"],
+        global_head_dim=target["global_head_dim"],
+        sliding_window=target["sliding_window"],
+        hidden_size_per_layer_input=0,
+        vocab_size_per_layer_input=0,
+        num_kv_shared_layers=2,
+        max_position_embeddings=1024,
+    )
+    # The released drafters use the centroid ("ordered embeddings") output head; so does this one.
+    config = Gemma4AssistantConfig(
+        text_config=text, backbone_hidden_size=target["hidden_size"], use_ordered_embeddings=True,
+        num_centroids=16, centroid_intermediate_top_k=4,
+    )
+    torch.manual_seed(seed)
+    model = Gemma4AssistantForCausalLM(config).eval()
+    for name, param in model.named_parameters():
+        param.uniform_(0.5, 1.5) if name.endswith("norm.weight") else param.normal_(0.0, 0.15)
+    model.masked_embedding.token_ordering.copy_(torch.randperm(TINY_VOCAB))
+    model.save_pretrained(path)
+    return path
+
+
 class ThreadedSwarm:
     """A tracker and peers on localhost, served from one background event loop, for tests.
 

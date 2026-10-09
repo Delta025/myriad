@@ -58,12 +58,18 @@ class Embedder(nn.Module):
         return self.embed.device
 
     @torch.inference_mode()
+    def token_embedding(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """The scaled token embedding alone ``[1, n, hidden]`` (no per-layer inputs)."""
+        # The scale is rounded to the weight dtype first, as in Gemma4TextScaledWordEmbedding.
+        scale = torch.tensor(self.config.hidden_size**0.5, dtype=self.embed.dtype)
+        return F.embedding(token_ids.to(self.device), self.embed) * scale
+
+    @torch.inference_mode()
     def forward(self, token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         """token_ids ``[1, n]`` → hidden ``[1, n, hidden]`` and per-layer inputs ``[1, n, layers, ple_dim]`` or None."""
         token_ids = token_ids.to(self.device)
         dtype = self.embed.dtype
-        # The scale is rounded to the weight dtype first, as in Gemma4TextScaledWordEmbedding.
-        hidden = F.embedding(token_ids, self.embed) * torch.tensor(self.config.hidden_size**0.5, dtype=dtype)
+        hidden = self.token_embedding(token_ids)
         if not self.ple_dim:
             return hidden, None
 
@@ -102,11 +108,18 @@ class Head(nn.Module):
         return self.output.device
 
     @torch.inference_mode()
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        """hidden ``[1, n, hidden]`` → logits ``[1, n, vocab]`` in the model dtype."""
-        hidden = _rms_norm(hidden.to(self.device), self.norm, self.config.rms_norm_eps)
-        logits = F.linear(hidden, self.output)
+    def normalize(self, hidden: torch.Tensor) -> torch.Tensor:
+        """The final norm: last-layer output → the model's final hidden state (what an MTP drafter reads)."""
+        return _rms_norm(hidden.to(self.device), self.norm, self.config.rms_norm_eps)
+
+    @torch.inference_mode()
+    def project(self, normed: torch.Tensor) -> torch.Tensor:
+        """Final hidden state ``[1, n, hidden]`` → logits ``[1, n, vocab]`` in the model dtype."""
+        logits = F.linear(normed, self.output)
         cap = self.config.final_logit_softcapping
         if cap is not None:
             logits = torch.tanh(logits / cap) * cap
         return logits
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.project(self.normalize(hidden))

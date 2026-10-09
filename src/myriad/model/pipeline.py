@@ -29,6 +29,10 @@ def as_ids(token_ids: Sequence[int] | torch.Tensor) -> torch.Tensor:
 
 class Pipeline(Protocol):
     length: int
+    embedder: Embedder
+    # Final hidden states ``[n, hidden]`` of the last forward call and its start position, for MTP drafters.
+    last_hidden: torch.Tensor | None
+    last_start_pos: int
 
     def forward(self, token_ids: Sequence[int] | torch.Tensor, start_pos: int) -> torch.Tensor:
         """Logits ``[n, vocab]`` (float32, on CPU) for `token_ids` placed at ``start_pos .. start_pos + n``."""
@@ -36,12 +40,18 @@ class Pipeline(Protocol):
 
     def truncate(self, length: int) -> None: ...
 
+    def cached_kv(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """K/V ``[1, heads, positions, head_dim]`` cached for a layer that runs in this process."""
+        ...
+
 
 class LocalPipeline:
     def __init__(self, embedder: Embedder, stages: list[Stage], head: Head):
         self.embedder, self.stages, self.head = embedder, stages, head
         self.caches = [KVCache() for _ in stages]
         self.length = 0
+        self.last_hidden: torch.Tensor | None = None
+        self.last_start_pos = 0
 
     @classmethod
     def from_checkpoint(
@@ -79,12 +89,20 @@ class LocalPipeline:
             stage_inputs = per_layer_inputs[:, :, stage.start : stage.end] if per_layer_inputs is not None else None
             hidden = stage(hidden, start_pos, cache, stage_inputs)
         self.length = start_pos + ids.shape[1]
-        return self.head(hidden)[0].float().cpu()
+        normed = self.head.normalize(hidden)
+        self.last_hidden, self.last_start_pos = normed[0], start_pos
+        return self.head.project(normed)[0].float().cpu()
 
     def truncate(self, length: int) -> None:
         for cache in self.caches:
             cache.truncate(length)
         self.length = min(self.length, length)
+
+    def cached_kv(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        for stage, cache in zip(self.stages, self.caches):
+            if stage.start <= layer_idx < stage.end:
+                return cache.layer(layer_idx)
+        raise KeyError(layer_idx)
 
 
 class HFReference:

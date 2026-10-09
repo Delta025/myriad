@@ -26,6 +26,16 @@ def kv_source_layers(config) -> dict[str, int]:
     }
 
 
+def last_layer_of_each_type(config) -> dict[str, int]:
+    """The last non-shared layer of each attention type, whose K/V Gemma 4's MTP drafter reads.
+
+    On 31B these are layers 58 (sliding) and 59 (global); on E2B/E4B the KV-sharing source layers.
+    """
+    first_shared = config.num_hidden_layers - (getattr(config, "num_kv_shared_layers", 0) or 0)
+    earlier = config.layer_types[:first_shared]
+    return {t: first_shared - 1 - earlier[::-1].index(t) for t in set(earlier)}
+
+
 def unsplittable_block(config) -> tuple[int, int] | None:
     """The layer range ``(start, end)`` that must stay in one stage, if any."""
     sources = kv_source_layers(config)

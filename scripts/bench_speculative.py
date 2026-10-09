@@ -1,7 +1,11 @@
 """Benchmark speculative decoding through a swarm, with and without injected latency.
 
-    uv run python scripts/bench_speculative.py google/gemma-4-E2B-it --draft google/gemma-4-E2B-it \\
-        --peers 2 --delays 0 20 50 100 --k 2 4
+    uv run python scripts/bench_speculative.py google/gemma-4-E2B-it --draft google/gemma-4-E2B-it --peers 2
+    uv run python scripts/bench_speculative.py google/gemma-4-E4B-it --mtp google/gemma-4-E4B-it-assistant --last-layers 20
+
+With --mtp, the draft is Gemma 4's official multi-token-prediction drafter. It reads
+the target's last sliding and last global layer, which must run on the client: pass
+--last-layers accordingly (2 on 31B; the whole KV-sharing block on E2B/E4B).
 
 For each per-peer delay, start a local swarm (tracker plus peer processes),
 then generate with plain greedy decoding and with speculative greedy decoding
@@ -23,7 +27,7 @@ import torch
 from transformers import AutoTokenizer
 from transformers.utils import logging as hf_logging
 
-from myriad.client.drafters import ModelDrafter
+from myriad.client.drafters import ModelDrafter, MTPDrafter
 from myriad.client.generate import greedy_generate
 from myriad.client.remote import RemotePipeline
 from myriad.client.speculative import speculative_generate
@@ -46,7 +50,9 @@ def same_text(out: list[int], plain: list[int]) -> str:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("model")
-    parser.add_argument("--draft", required=True)
+    draft = parser.add_mutually_exclusive_group(required=True)
+    draft.add_argument("--draft", help="a draft model, e.g. google/gemma-4-E2B-it")
+    draft.add_argument("--mtp", help="an MTP drafter, e.g. google/gemma-4-E4B-it-assistant")
     parser.add_argument("--peers", type=int, default=2)
     parser.add_argument("--first-layers", type=int, default=1)
     parser.add_argument("--last-layers", type=int, default=0)
@@ -66,21 +72,27 @@ def main():
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": PROMPT}], add_generation_prompt=True, tokenize=True, return_dict=False
     )
-    print(f"target {args.model} (peers {split}), draft {args.draft}, {args.tokens} tokens")
-    # The draft runs on the client for every guessed token, so its embedding and head go on the GPU too;
-    # only the per-layer-embedding table of E2B/E4B stays in CPU RAM.
-    drafter = ModelDrafter(
-        LocalPipeline.from_checkpoint(args.draft, None, torch.bfloat16, args.device, args.device, ple_device="cpu")
-    )
+    print(f"target {args.model} (client layers 0-{args.first_layers - 1} and {n_layers - args.last_layers}-{n_layers - 1}, "
+          f"peers {split}), draft {args.draft or args.mtp} {'(MTP)' if args.mtp else ''}, {args.tokens} tokens")
+    if args.draft:
+        # The draft runs on the client for every guessed token, so its embedding and head go on the GPU too;
+        # only the per-layer-embedding table of E2B/E4B stays in CPU RAM.
+        drafter = ModelDrafter(
+            LocalPipeline.from_checkpoint(args.draft, None, torch.bfloat16, args.device, args.device, ple_device="cpu")
+        )
 
+    # Load the client's own weights once; each latency setting gets a fresh swarm and session.
+    parts = RemotePipeline.load_client_parts(ckpt, args.first_layers, args.last_layers, torch.bfloat16, args.device, "cpu")
     rows = []
     for delay in args.delays:
         log_dir = Path(tempfile.mkdtemp(prefix="myriad-bench-"))
         with LocalSwarm(args.model, split, log_dir, delay):
             target = RemotePipeline.connect(
                 ckpt, TRACKER_URL, model=args.model, first_layers=args.first_layers, last_layers=args.last_layers,
-                stage_device=args.device, ends_device="cpu",
+                stage_device=args.device, ends_device="cpu", parts=parts,
             )
+            if args.mtp:
+                drafter = MTPDrafter.from_pretrained(target, args.mtp, args.device)
             with target:
                 greedy_generate(target, prompt, 4)  # warm up kernels and connections
                 t = time.perf_counter()
@@ -111,7 +123,7 @@ def main():
         print(f"| {r['delay_ms']:.0f} ms | {mode} | {r['tok_s']:.2f} | {r['speedup']:.2f}x | {acc} | "
               f"{r['tokens_per_trip']:.2f} | {r['same']} |")
     if args.json:
-        args.json.write_text(json.dumps(dict(model=args.model, draft=args.draft, split=split, rows=rows), indent=2))
+        args.json.write_text(json.dumps(dict(model=args.model, draft=args.draft or args.mtp, split=split, rows=rows), indent=2))
 
 
 if __name__ == "__main__":
