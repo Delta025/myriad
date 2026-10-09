@@ -18,7 +18,7 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | Project skeleton, tiny random-weight Gemma 4 test models | Done |
 | Run a model as a chain of layer-range stages, with a cache that can roll back | **Done.** Bit-identical to Transformers on Gemma 4 E2B and E4B |
 | Stages on separate peers over the network, tracker | **Done.** Bit-identical to the in-process pipeline |
-| Speculative decoding across the swarm | **Done.** Up to 1.97x faster under latency, same output |
+| Speculative decoding across the swarm | **Done.** Up to 1.97x faster under latency; same output (in bf16, up to near-ties) |
 | Official Gemma 4 multi-token-prediction drafter | **Done.** Runs entirely on the client |
 | Live dashboard | **Done** |
 | Tit-for-tat credits | **Done.** Signed receipts, local ledgers, contributors served first |
@@ -189,6 +189,7 @@ tests/
 - **Sliding-window layers keep their whole history,** so rollback is always exact. They could keep only the window plus the draft length.
 - **bf16 speculative output can part from plain output at near-ties** (see above). Batch-invariant kernels would remove this.
 - **The client calls peers one after another.** Relaying peer to peer would halve the network legs per trip.
+- **Credits count direct reciprocity only.** A peer credits work done for its own node; receipts are not yet shown to third parties, and there is no defence against fake identities yet (an EigenTrust-style weighting is the planned approach).
 
 ## Prior work
 
