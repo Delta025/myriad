@@ -117,6 +117,8 @@ uv run myriad generate google/gemma-4-E2B-it --tracker http://127.0.0.1:8000 --p
 
 Add `--draft google/gemma-4-E2B-it --k 4` (or `--mtp <drafter> --last-layers <n>`) to `generate` for speculative decoding, and `--temperature`, `--top-p`, `--top-k`, `--seed` for sampling.
 
+To run Gemma 4 31B on rented GPUs in several regions, see [docs/deploy-runpod.md](docs/deploy-runpod.md).
+
 Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
 
 ### Tit-for-tat credits

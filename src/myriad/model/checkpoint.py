@@ -1,20 +1,26 @@
-"""Read a Gemma 4 checkpoint without loading all of it.
+"""Read a Gemma 4 checkpoint without downloading or loading all of it.
 
-A peer that hosts layers 20-40 of 31B should read about a third of the weights,
-not 62 GB. `Checkpoint` maps tensor names to safetensors files and loads only
-the tensors that are asked for.
+A peer that hosts layers 20-40 of 31B should fetch and read about a third of the
+weights, not 62 GB. `Checkpoint` maps tensor names to safetensors files and loads
+only the tensors that are asked for. For a model on the Hub it downloads only the
+metadata up front; weights come later, tensor by tensor, by HTTP range requests
+(see `remote_weights.py`), unless a whole shard is already on disk.
 """
 
 import json
+import os
 from collections.abc import Iterable
 from pathlib import Path
 
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from safetensors import safe_open
 from transformers import AutoConfig, Gemma4TextConfig
 
-_DOWNLOAD_PATTERNS = ["*.json", "*.safetensors", "tokenizer*", "*.jinja"]
+from myriad.model.remote_weights import RemoteTensors, hub_reader
+
+_METADATA_PATTERNS = ["*.json", "tokenizer*", "*.jinja"]
+CACHE = Path(os.environ.get("MYRIAD_CACHE", Path.home() / ".cache" / "myriad"))
 
 
 class Checkpoint:
@@ -22,18 +28,28 @@ class Checkpoint:
 
     def __init__(self, name_or_path: str | Path):
         path = Path(name_or_path)
+        self.repo_id = None
         if not path.is_dir():
-            path = Path(snapshot_download(str(name_or_path), allow_patterns=_DOWNLOAD_PATTERNS))
+            # Metadata only (config, index, tokenizer); weight shards come later, on demand.
+            self.repo_id = str(name_or_path)
+            path = Path(snapshot_download(self.repo_id, allow_patterns=_METADATA_PATTERNS))
         self.path = path
+        self._remote = None
+        if self.repo_id is not None:
+            revision = path.name  # the snapshot directory is named after the commit
+            cache = CACHE / self.repo_id.replace("/", "--") / revision
+            self._remote = RemoteTensors(hub_reader(self.repo_id, revision), cache)
 
         index = path / "model.safetensors.index.json"
         if index.exists():
             weight_map = json.loads(index.read_text())["weight_map"]
             self._files = {name: path / file for name, file in weight_map.items()}
+        elif (path / "model.safetensors").exists():
+            with safe_open(path / "model.safetensors", "pt") as f:
+                self._files = {name: path / "model.safetensors" for name in f.keys()}
         else:
-            file = path / "model.safetensors"
-            with safe_open(file, "pt") as f:
-                self._files = {name: file for name in f.keys()}
+            table, _ = self._remote.header("model.safetensors")
+            self._files = {name: path / "model.safetensors" for name in table if not name.startswith("__")}
 
         # Released checkpoints are multimodal (`model.language_model.*`); a text-only
         # Gemma4ForCausalLM would use `model.*`.
@@ -53,9 +69,21 @@ class Checkpoint:
         full = self.text_prefix + prefix
         return [n[len(self.text_prefix) :] for n in self._files if n.startswith(full)]
 
+    def _local(self, file: Path) -> Path:
+        """Make sure a weight file is on disk, downloading it from the Hub if needed."""
+        if not file.exists() and self.repo_id is not None:
+            # The snapshot directory is named after the commit, so this fetches the same revision.
+            hf_hub_download(self.repo_id, file.name, revision=self.path.name)
+        return file
+
+    def download_all(self) -> None:
+        """Fetch every weight file, for code that loads the whole model (such as the Transformers reference)."""
+        for file in sorted(set(self._files.values())):
+            self._local(file)
+
     def rows(self, name: str) -> "LazyRows":
         """A large 2-D tensor whose rows are read from disk only when asked for."""
-        return LazyRows(self._files[self.text_prefix + name], self.text_prefix + name)
+        return LazyRows(self._local(self._files[self.text_prefix + name]), self.text_prefix + name)
 
     def load(
         self, names: Iterable[str], device: torch.device | str = "cpu", dtype: torch.dtype | None = None
@@ -67,12 +95,17 @@ class Checkpoint:
 
         tensors = {}
         for file, file_names in by_file.items():
-            with safe_open(file, "pt") as f:
-                for name in file_names:
-                    t = f.get_tensor(self.text_prefix + name)
-                    if dtype is not None and t.is_floating_point():
-                        t = t.to(dtype)
-                    tensors[name] = t.to(device)
+            full_names = [self.text_prefix + n for n in file_names]
+            if file.exists() or self._remote is None:
+                with safe_open(file, "pt") as f:
+                    raw = {n: f.get_tensor(full) for n, full in zip(file_names, full_names)}
+            else:
+                self._remote.fetch(file.name, full_names)
+                raw = {n: self._remote.load(file.name, full) for n, full in zip(file_names, full_names)}
+            for name, t in raw.items():
+                if dtype is not None and t.is_floating_point():
+                    t = t.to(dtype)
+                tensors[name] = t.to(device)
         return tensors
 
 

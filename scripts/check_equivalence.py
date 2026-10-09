@@ -57,6 +57,7 @@ def free_memory():
 
 @torch.inference_mode()
 def run_reference(ckpt: Checkpoint, prompt_ids: list[int], n_new: int, stage_device: str, ends_device: str):
+    ckpt.download_all()  # Transformers loads the whole model from the directory
     config = AutoConfig.from_pretrained(ckpt.path)
     config.vision_config = None  # text only: skip loading the vision and audio towers
     config.audio_config = None
