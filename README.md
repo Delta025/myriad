@@ -123,7 +123,7 @@ Each command runs in its own terminal, and peers can run on different machines (
 
 Peers that contribute get served first, without a token or a blockchain:
 
-- **Identities and receipts.** Every node has an Ed25519 key, shared by its peer and its client. After each call, the peer returns a receipt saying which layers it ran, for how many positions, for which client. The peer signs it; the client checks that it describes exactly that call, and countersigns it with its next request. Both sides keep doubly signed records, as in Tribler's [TrustChain](https://doi.org/10.1016/j.future.2017.08.048). A peer that inflates its receipts is rejected.
+- **Identities and receipts.** Every node has an Ed25519 key, shared by its peer and its client. After each call, the peer returns a receipt saying which layers it ran, for how many positions, for which client. The peer signs it; the client checks that it describes exactly that call, and countersigns it with its next request. Both sides keep doubly signed records, as in Tribler's TrustChain (Otte, de Vos and Pouwelse, Future Generation Computer Systems, 2020). A peer that inflates its receipts is rejected.
 - **Local ledgers.** Each node keeps its own SQLite ledger of the receipts it is party to. There is no global ledger.
 - **Tit-for-tat queues.** When several requests wait for a peer's GPU, it first serves its own node's client, then requesters by how much work they have done for its node. One slot in five goes to a random waiting request (BitTorrent's "optimistic unchoke"), so newcomers and freeloaders still make progress.
 
