@@ -45,12 +45,18 @@ uv sync --no-dev
 # build for an older CUDA from the PyTorch index instead.
 if command -v nvidia-smi >/dev/null && ! uv run --no-sync python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
   cuda=$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9]*\)\.\([0-9]*\).*/\1\2/p' | head -1)
-  for index in cu130 cu128 cu126 cu124; do
-    if [ "${cuda:-0}" -ge "${index#cu}" ]; then break; fi
-  done
   version=$(uv run --no-sync python -c "import torch; print(torch.__version__.split('+')[0])")
-  echo "driver supports CUDA ${cuda}; installing torch ${version} for ${index}"
-  uv pip install --reinstall "torch==${version}" --index-url "https://download.pytorch.org/whl/${index}"
+  # Not every torch release is built for every CUDA (2.14.1: cu130 and cu126 only), so try each
+  # build this driver can run, newest first.
+  installed=""
+  for index in cu130 cu129 cu128 cu126 cu124; do
+    [ "${cuda:-0}" -ge "${index#cu}" ] || continue
+    echo "driver supports CUDA ${cuda}; trying torch ${version} for ${index}"
+    if uv pip install --reinstall "torch==${version}" --index-url "https://download.pytorch.org/whl/${index}"; then
+      installed=$index; break
+    fi
+  done
+  [ -n "$installed" ] || { echo "no torch ${version} build for a CUDA ${cuda} driver" >&2; exit 1; }
   uv run --no-sync python -c "import torch; assert torch.cuda.is_available(), 'CUDA still unavailable'"
 fi
 
