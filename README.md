@@ -22,7 +22,7 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | Official Gemma 4 multi-token-prediction drafter | **Done.** Runs entirely on the client |
 | Live dashboard | **Done** |
 | Tit-for-tat credits | **Done.** Signed receipts, local ledgers, contributors served first |
-| Multi-region deployment and benchmarks | Next |
+| Multi-region deployment and benchmarks | **Done.** Gemma 4 31B across Montreal and Sweden, 1.76x with speculation |
 
 ### What works today
 
@@ -120,6 +120,26 @@ Add `--draft google/gemma-4-E2B-it --k 4` (or `--mtp <drafter> --last-layers <n>
 To run Gemma 4 31B on rented GPUs in several regions, see [docs/deploy-runpod.md](docs/deploy-runpod.md).
 
 Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
+
+### Gemma 4 31B across two countries
+
+Gemma 4 31B, split over two rented A40 GPUs in different countries, with the client on an RTX 3080 desktop in Montreal:
+
+- the client: the embedding, layer 0, layers 58–59, the output head and the MTP drafter (3.7 GB of GPU memory)
+- one peer in Montreal: layers 1–29, about 10 ms away
+- one peer in Sweden: layers 30–57, about 107 ms away
+
+Each peer downloads only its own layers' tensors, about 28 GB each, by HTTP range requests.
+
+| Mode | Tokens/s | Speedup | Guesses accepted | Tokens per trip | Same output |
+| --- | --- | --- | --- | --- | --- |
+| Plain | 2.05 | 1.00x | | 1.00 | yes |
+| Official MTP drafter, k=2 | **3.60** | **1.76x** | 64% | 2.25 | yes |
+| Official MTP drafter, k=4 | 3.39 | 1.66x | 43% | 2.62 | yes |
+| Gemma 4 E2B as draft, k=2 | 3.11 | 1.54x | 68% | 2.33 | yes |
+| Gemma 4 E2B as draft, k=4 | 2.93 | 1.45x | 55% | 3.15 | yes |
+
+E2B guesses right slightly more often, but the official drafter is much cheaper to run, so it wins. Each trip still costs about 0.5 s: about 115 ms of network, about 115 ms of compute on the two peers (launch-bound, see below), and the rest on the client (its three layers and the output head) and in per-call overhead on the peers that is not yet fully explained. Halving any of these raises both columns.
 
 ### Tit-for-tat credits
 
