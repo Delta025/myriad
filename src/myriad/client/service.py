@@ -10,6 +10,7 @@ from any browser, for example a laptop that could never run the model itself.
     GET  /health
 """
 
+import logging
 import threading
 import time
 
@@ -25,6 +26,8 @@ from myriad.client.reporting import Reporter
 from myriad.client.sampling import GREEDY
 from myriad.client.speculative import speculative_generate
 from myriad.model.checkpoint import Checkpoint
+
+log = logging.getLogger("myriad.client.service")
 
 
 class GenerateRequest(BaseModel):
@@ -102,6 +105,14 @@ def create_app(service: ClientService) -> FastAPI:
 
     @app.post("/generate")
     def generate_endpoint(req: GenerateRequest):  # plain def: FastAPI runs it in a worker thread
-        return service.generate(req)
+        try:
+            return service.generate(req)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # An unhandled error would come back without CORS headers, and the browser would only say
+            # "CORS". Report what failed (for example a peer that cannot be reached) instead.
+            log.exception("generation failed")
+            raise HTTPException(502, f"generation failed: {type(exc).__name__}: {exc}") from exc
 
     return app
