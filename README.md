@@ -174,6 +174,8 @@ The tracker serves a live dashboard at its root URL (for example http://127.0.0.
 
 By default the client sends the tracker only counts and timings. Pass `--share-text` to `generate` to show the text too: whoever runs the tracker can then read the output.
 
+The client can also run as a small HTTP service (`myriad client-service`). The dashboard then shows an "Ask the swarm" box, with a switch for speculative decoding. A demo can be driven from any browser, even on a machine that could never run the model. Open the dashboard as `…/?client=<client service URL>`; [docs/deploy-runpod.md](docs/deploy-runpod.md) shows the setup.
+
 To try it on one machine, `uv run python scripts/local_swarm.py google/gemma-4-E2B-it --peers 2 --delay-ms 40` starts a tracker and peers. The dashboard is then at http://127.0.0.1:8765/.
 
 To check that a swarm of local peer processes matches the in-process pipeline exactly:
@@ -193,13 +195,13 @@ uv run python scripts/bench_speculative.py google/gemma-4-E2B-it --draft google/
 ```
 src/myriad/
   model/      checkpoint loading, split rules, stages, KV cache, masks, embedding/head, pipelines
-  client/     generation, sampling, speculative decoding, drafters, RemotePipeline (client side of a swarm)
+  client/     generation, sampling, speculative decoding, drafters, RemotePipeline, HTTP client service
   peer/       peer server (one stage, one KV cache per session) and tit-for-tat scheduler
   tracker/    peer registry, route selection, event stream for the dashboard
   protocol/   wire messages (msgpack, raw tensor bytes)
   ledger/     Ed25519 identities, signed receipts, per-node SQLite ledger
   dashboard/  live web view, served by the tracker
-  cli.py      `myriad tracker | peer | generate`
+  cli.py      `myriad tracker | peer | generate | client-service`
   testing.py  tiny random-weight Gemma 4 checkpoints, in-process test swarm
 scripts/      equivalence checks, netem helper, later deployment and benchmarks
 tests/
