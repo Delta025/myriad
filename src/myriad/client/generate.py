@@ -1,19 +1,33 @@
-"""Plain (non-speculative) generation over any `Pipeline`."""
+"""Plain (non-speculative) generation over any `Pipeline`: one target call per token."""
 
 from collections.abc import Sequence
 
+import torch
+
+from myriad.client.sampling import GREEDY, Sampling, pick
 from myriad.model.pipeline import Pipeline
+
+
+def generate(
+    pipeline: Pipeline,
+    prompt: Sequence[int],
+    max_new_tokens: int,
+    sampling: Sampling = GREEDY,
+    stop_ids: Sequence[int] = (),
+    generator: torch.Generator | None = None,
+) -> list[int]:
+    """Generate up to `max_new_tokens` tokens. Returns only the new tokens."""
+    logits = pipeline.forward(list(prompt), start_pos=0)
+    generated: list[int] = []
+    while True:
+        token = pick(logits[-1], sampling, generator)
+        generated.append(token)
+        if token in stop_ids or len(generated) == max_new_tokens:
+            return generated
+        logits = pipeline.forward([token], start_pos=len(prompt) + len(generated) - 1)
 
 
 def greedy_generate(
     pipeline: Pipeline, prompt: Sequence[int], max_new_tokens: int, stop_ids: Sequence[int] = ()
 ) -> list[int]:
-    """Generate up to `max_new_tokens` tokens, one round trip each. Returns only the new tokens."""
-    logits = pipeline.forward(list(prompt), start_pos=0)
-    generated: list[int] = []
-    while True:
-        token = int(logits[-1].argmax())
-        generated.append(token)
-        if token in stop_ids or len(generated) == max_new_tokens:
-            return generated
-        logits = pipeline.forward([token], start_pos=len(prompt) + len(generated) - 1)
+    return generate(pipeline, prompt, max_new_tokens, GREEDY, stop_ids)

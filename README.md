@@ -18,7 +18,8 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | Project skeleton, tiny random-weight Gemma 4 test models | Done |
 | Run a model as a chain of layer-range stages, with a cache that can roll back | **Done.** Bit-identical to Transformers on Gemma 4 E2B and E4B |
 | Stages on separate peers over the network, tracker | **Done.** Bit-identical to the in-process pipeline |
-| Speculative decoding across the swarm | Next |
+| Speculative decoding across the swarm | **Done.** Up to 1.97x faster under latency, same output |
+| Official Gemma 4 multi-token-prediction drafter | Next |
 | Tit-for-tat credits | Planned |
 | Live dashboard | Planned |
 | Multi-region deployment and benchmarks | Planned |
@@ -64,6 +65,26 @@ To check a real model against Transformers (downloads the weights from Hugging F
 uv run python scripts/check_equivalence.py google/gemma-4-E4B-it --stages 3
 ```
 
+### Speculative decoding
+
+The client drafts `k` tokens with a small local model. One call then carries the last token plus all `k` guesses through every peer. The client checks them against the target's predictions, which it can do because it holds the output head. It keeps the longest agreeing prefix plus one token from the target, so every trip through the swarm yields 1 to `k+1` tokens. Rejected guesses cost no extra message: the next call starts at the first changed position, and every peer overwrites from there.
+
+- **Greedy:** a guess is accepted only if it equals the target's own choice.
+- **Sampling:** uses the acceptance rule of [Leviathan et al.](https://arxiv.org/abs/2211.17192) and [Chen et al.](https://arxiv.org/abs/2302.01318), which keeps the output distributed exactly as sampling from the target alone. A Monte Carlo test checks this.
+
+Benchmark on one RTX 3080: Gemma 4 E2B as the target, split over 2 peer processes, with simulated round-trip latency per peer (`scripts/bench_speculative.py`, 64 tokens). For this test the draft is E2B itself, which is as expensive as the target, so it is a pessimistic case for draft cost. A real setup drafts for a much larger target (31B).
+
+| Latency per peer | Plain | Speculative, k=2 | Speculative, k=4 |
+| --- | --- | --- | --- |
+| 0 ms | 7.20 tok/s | 8.05 tok/s (1.12x) | 7.87 tok/s (1.09x) |
+| 20 ms | 5.87 tok/s | 7.29 tok/s (1.24x) | 7.31 tok/s (1.25x) |
+| 50 ms | 4.30 tok/s | 6.18 tok/s (1.44x) | 6.59 tok/s (1.53x) |
+| 100 ms | 2.77 tok/s | 5.23 tok/s (1.89x) | 5.44 tok/s (1.97x) |
+
+The more latency between peers, the more speculation helps, because it removes round trips.
+
+About exactness: speculative greedy output is identical to plain greedy output in float32, on the tiny test models and on E2B (`scripts/check_chunking.py`). In bfloat16, checking `k+1` tokens in one call rounds slightly differently from one token at a time, so the two can part where the top two tokens are tied within bf16 noise. In the k=4 runs above that happened once, at token 11, where " dances" and " intricate" were 0.016 apart.
+
 ## Running a swarm
 
 ```bash
@@ -73,6 +94,8 @@ uv run myriad peer google/gemma-4-E2B-it --layers 13:35 --port 9002 --tracker ht
 uv run myriad generate google/gemma-4-E2B-it --tracker http://127.0.0.1:8000 --prompt "Why is the sky blue?"
 ```
 
+Add `--draft google/gemma-4-E2B-it --k 4` to `generate` for speculative decoding, and `--temperature`, `--top-p`, `--top-k`, `--seed` for sampling.
+
 Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
 
 To check that a swarm of local peer processes matches the in-process pipeline exactly:
@@ -81,12 +104,18 @@ To check that a swarm of local peer processes matches the in-process pipeline ex
 uv run python scripts/check_network.py google/gemma-4-E2B-it --peers 3 --delay-ms 20
 ```
 
+To benchmark speculative decoding under latency:
+
+```bash
+uv run python scripts/bench_speculative.py google/gemma-4-E2B-it --draft google/gemma-4-E2B-it --peers 2 --delays 0 20 50 100 --k 2 4
+```
+
 ## Layout
 
 ```
 src/myriad/
   model/      checkpoint loading, split rules, stages, KV cache, masks, embedding/head, pipelines
-  client/     generation loops, RemotePipeline (client side of a swarm); speculative decoding to come
+  client/     generation, sampling, speculative decoding, drafters, RemotePipeline (client side of a swarm)
   peer/       peer server: one stage, one KV cache per session
   tracker/    peer registry, route selection, event stream for the dashboard
   protocol/   wire messages (msgpack, raw tensor bytes)

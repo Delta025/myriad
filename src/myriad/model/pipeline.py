@@ -51,8 +51,12 @@ class LocalPipeline:
         dtype: torch.dtype = torch.bfloat16,
         stage_devices: Sequence[str] | str = "cpu",
         ends_device: str = "cpu",
+        ple_device: str | None = None,
     ) -> "LocalPipeline":
-        """Load a pipeline; `split` defaults to one stage holding every layer."""
+        """Load a pipeline; `split` defaults to one stage holding every layer.
+
+        `ple_device` (default: `ends_device`) is where the per-layer-embedding table of E2B/E4B lives.
+        """
         if not isinstance(checkpoint, Checkpoint):
             checkpoint = Checkpoint(checkpoint)
         config = checkpoint.text_config()
@@ -61,7 +65,7 @@ class LocalPipeline:
         if isinstance(stage_devices, str):
             stage_devices = [stage_devices] * len(split)
 
-        embedder = Embedder.from_checkpoint(checkpoint, ends_device, dtype)
+        embedder = Embedder.from_checkpoint(checkpoint, ends_device, dtype, ple_device)
         head = Head.from_checkpoint(checkpoint, ends_device, dtype, embedder=embedder)
         stages = [Stage.from_checkpoint(checkpoint, a, b, dev, dtype) for (a, b), dev in zip(split, stage_devices)]
         return cls(embedder, stages, head)

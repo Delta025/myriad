@@ -27,6 +27,17 @@ HEARTBEAT_SECONDS = 5.0
 MAX_FRAME_BYTES = 256 * 2**20
 
 
+async def _precise_sleep(seconds: float) -> None:
+    """Sleep at least `seconds`, to within about a millisecond.
+
+    asyncio may wake a timer up to one clock tick early (15.6 ms on Windows), so re-check
+    against perf_counter and finish the last couple of milliseconds by yielding.
+    """
+    end = time.perf_counter() + seconds
+    while (remaining := end - time.perf_counter()) > 0:
+        await asyncio.sleep(remaining if remaining > 0.002 else 0)
+
+
 @dataclass
 class Session:
     cache: KVCache = field(default_factory=KVCache)
@@ -108,7 +119,7 @@ class PeerServer:
                     log.exception("request failed")
                     reply = error(request, "internal", repr(exc))
                 if self.delay_ms:
-                    await asyncio.sleep(self.delay_ms / 1000)
+                    await _precise_sleep(self.delay_ms / 1000)
                 await ws.send(encode(reply))
         except ConnectionClosed:
             pass

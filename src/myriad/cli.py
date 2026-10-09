@@ -3,6 +3,7 @@
     myriad tracker --port 8000
     myriad peer google/gemma-4-E2B-it --layers 1:13 --port 9001 --tracker http://127.0.0.1:8000
     myriad generate google/gemma-4-E2B-it --tracker http://127.0.0.1:8000 --prompt "Hello"
+    myriad generate google/gemma-4-31B-it --tracker ... --draft google/gemma-4-E2B-it --k 4 --prompt "Hello"
 """
 
 import argparse
@@ -45,9 +46,13 @@ def run_peer(args) -> None:
 def run_generate(args) -> None:
     from transformers import AutoTokenizer, GenerationConfig
 
-    from myriad.client.generate import greedy_generate
+    from myriad.client.drafters import ModelDrafter
+    from myriad.client.generate import generate
     from myriad.client.remote import RemotePipeline
+    from myriad.client.sampling import Sampling
+    from myriad.client.speculative import speculative_generate
     from myriad.model.checkpoint import Checkpoint
+    from myriad.model.pipeline import LocalPipeline
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = Checkpoint(args.model)
@@ -55,22 +60,50 @@ def run_generate(args) -> None:
         checkpoint, args.tracker, model=args.name or args.model, first_layers=args.first_layers,
         last_layers=args.last_layers, dtype=DTYPES[args.dtype], stage_device=device, ends_device=args.ends_device,
     )
+    drafter = None
+    if args.draft:
+        # the draft runs once per guessed token, so its head goes on the GPU too (PLE table stays in RAM)
+        draft = LocalPipeline.from_checkpoint(args.draft, None, DTYPES[args.dtype], device, device, ple_device="cpu")
+        drafter = ModelDrafter(draft)
+
     tokenizer = AutoTokenizer.from_pretrained(checkpoint.path)
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": args.prompt}], add_generation_prompt=True, tokenize=True, return_dict=False
     )
     route = " -> ".join(f"{p.peer_id}[{p.start}-{p.end - 1}]@{p.region}" for p in pipe.peers)
     print(f"route: client -> {route} -> client")
+    sampling = Sampling(args.temperature, args.top_k, args.top_p)
+    generator = torch.Generator().manual_seed(args.seed)
+
+    def report_round(r, produced):
+        # counts and timings only: the tracker never sees the text
+        pipe.events.emit(
+            {"type": "speculation", "time": time.time(), "client_id": pipe.client_id, "session": pipe.session,
+             "proposed": r.proposed, "accepted": r.accepted, "produced": len(produced),
+             "draft_ms": round(r.draft_ms, 2), "verify_ms": round(r.verify_ms, 2)}
+        )
 
     with pipe:
         eos = GenerationConfig.from_pretrained(checkpoint.path).eos_token_id
         stop = eos if isinstance(eos, list) else [eos]
         t = time.perf_counter()
-        tokens = greedy_generate(pipe, prompt, args.max_tokens, stop_ids=stop)
+        if drafter is None:
+            tokens = generate(pipe, prompt, args.max_tokens, sampling, stop, generator)
+        else:
+            tokens, stats = speculative_generate(
+                pipe, drafter, prompt, args.max_tokens, args.k, sampling, stop, generator, on_round=report_round
+            )
         elapsed = time.perf_counter() - t
     print(tokenizer.decode(tokens, skip_special_tokens=True))
-    print(f"\n{len(tokens)} tokens in {elapsed:.1f}s ({len(tokens) / elapsed:.1f} tok/s)")
-    _print_hop_summary(pipe.events.history[1:])  # skip the prefill
+    print()
+    print(f"{len(tokens)} tokens in {elapsed:.1f}s ({len(tokens) / elapsed:.1f} tok/s)")
+    if drafter is not None:
+        print(
+            f"speculation: k={args.k}, acceptance {stats.acceptance_rate:.0%}, "
+            f"{stats.tokens_per_round:.2f} tokens per trip, {len(stats.rounds)} trips"
+        )
+    forwards = [e for e in pipe.events.history if e["type"] == "forward"]
+    _print_hop_summary(forwards[1:])  # skip the prefill
 
 
 def _print_hop_summary(events: list[dict]) -> None:
@@ -121,6 +154,12 @@ def main(argv=None) -> None:
     p.add_argument("--device", help="device for the client's layers (default: cuda if available)")
     p.add_argument("--ends-device", default="cpu", help="device for embedding and output head")
     p.add_argument("--dtype", choices=DTYPES, default="bfloat16")
+    p.add_argument("--draft", help="draft model for speculative decoding, e.g. google/gemma-4-E2B-it")
+    p.add_argument("--k", type=int, default=4, help="tokens drafted per round")
+    p.add_argument("--temperature", type=float, default=0.0, help="0 = greedy")
+    p.add_argument("--top-k", type=int, default=0)
+    p.add_argument("--top-p", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=run_generate)
 
     args = parser.parse_args(argv)

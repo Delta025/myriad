@@ -11,24 +11,21 @@ process with the same devices. PASS means identical tokens and bit-identical log
 
 import argparse
 import statistics
-import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
 
-import httpx
 import torch
 from transformers import AutoTokenizer
 from transformers.utils import logging as hf_logging
 
 from myriad.client.remote import RemotePipeline
+from myriad.localswarm import TRACKER_URL, LocalSwarm
 from myriad.model.checkpoint import Checkpoint
 from myriad.model.pipeline import LocalPipeline
 from myriad.model.split import even_split
 
 PROMPT = "Explain in three sentences why the sky is blue."
-TRACKER_PORT, FIRST_PEER_PORT = 8765, 9765
 
 
 def greedy_with_logits(pipe, prompt_ids: list[int], n_new: int):
@@ -39,45 +36,6 @@ def greedy_with_logits(pipe, prompt_ids: list[int], n_new: int):
         logits.append(pipe.forward([tokens[-1]], start_pos=len(prompt_ids) + len(tokens) - 1))
         tokens.append(int(logits[-1][-1].argmax()))
     return tokens, torch.cat(logits)
-
-
-def start_swarm(model: str, split, delay_ms: float, log_dir: Path) -> list[subprocess.Popen]:
-    cli = [sys.executable, "-m", "myriad.cli"]
-    tracker_url = f"http://127.0.0.1:{TRACKER_PORT}"
-
-    def launch(name, args):
-        log = open(log_dir / f"{name}.log", "w")
-        return subprocess.Popen(cli + args, stdout=log, stderr=subprocess.STDOUT)
-
-    procs = [launch("tracker", ["tracker", "--host", "127.0.0.1", "--port", str(TRACKER_PORT)])]
-    for i, (a, b) in enumerate(split):
-        procs.append(
-            launch(
-                f"peer{i}",
-                ["-v", "peer", model, "--layers", f"{a}:{b}", "--host", "127.0.0.1", "--port", str(FIRST_PEER_PORT + i),
-                 "--tracker", tracker_url, "--region", f"local-{i}", "--delay-ms", str(delay_ms)],
-            )
-        )
-
-    deadline = time.monotonic() + 300
-    while True:
-        if any(p.poll() is not None for p in procs):
-            raise RuntimeError(f"a swarm process exited early; see logs in {log_dir}")
-        try:
-            if len(httpx.get(f"{tracker_url}/peers", timeout=2).json()) == len(split):
-                return procs
-        except httpx.HTTPError:
-            pass
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"peers did not register; see logs in {log_dir}")
-        time.sleep(0.5)
-
-
-def stop_swarm(procs: list[subprocess.Popen]) -> None:
-    for p in procs:
-        p.terminate()
-    for p in procs:
-        p.wait(timeout=30)
 
 
 def print_hops(events: list[dict]) -> None:
@@ -113,10 +71,9 @@ def main():
 
     log_dir = Path(tempfile.mkdtemp(prefix="myriad-swarm-"))
     print(f"Phase 1: swarm of {args.peers} peer processes (logs in {log_dir})")
-    procs = start_swarm(args.model, peer_split, args.delay_ms, log_dir)
-    try:
+    with LocalSwarm(args.model, peer_split, log_dir, args.delay_ms):
         pipe = RemotePipeline.connect(
-            ckpt, f"http://127.0.0.1:{TRACKER_PORT}", model=args.model, first_layers=1, last_layers=0,
+            ckpt, TRACKER_URL, model=args.model, first_layers=1, last_layers=0,
             stage_device=args.stage_device, ends_device="cpu",
         )
         with pipe:
@@ -125,8 +82,6 @@ def main():
             print(f"  {len(net_tokens)} tokens in {time.perf_counter() - t:.1f}s")
             print_hops(pipe.events.history)
         del pipe
-    finally:
-        stop_swarm(procs)
 
     print("Phase 2: same split in one process")
     local = LocalPipeline.from_checkpoint(ckpt, [(0, 1), *peer_split], torch.bfloat16, args.stage_device, "cpu")

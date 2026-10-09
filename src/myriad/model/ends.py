@@ -43,9 +43,15 @@ class Embedder(nn.Module):
         return names
 
     @classmethod
-    def from_checkpoint(cls, checkpoint: Checkpoint, device="cpu", dtype=torch.bfloat16) -> "Embedder":
+    def from_checkpoint(cls, checkpoint: Checkpoint, device="cpu", dtype=torch.bfloat16, ple_device=None) -> "Embedder":
+        """`ple_device` can keep the large per-layer-embedding table (4-5 GiB on E2B/E4B) in CPU RAM
+        while the rest runs on the GPU; only a few rows of it are read per token."""
         config = checkpoint.text_config()
-        return cls(config, checkpoint.load(cls.weight_names(config), device, dtype))
+        names = cls.weight_names(config)
+        weights = checkpoint.load([n for n in names if n != "embed_tokens_per_layer.weight"], device, dtype)
+        if "embed_tokens_per_layer.weight" in names:
+            weights |= checkpoint.load(["embed_tokens_per_layer.weight"], ple_device or device, dtype)
+        return cls(config, weights)
 
     @property
     def device(self) -> torch.device:
@@ -62,7 +68,8 @@ class Embedder(nn.Module):
             return hidden, None
 
         n_layers = self.config.num_hidden_layers
-        token_part = F.embedding(token_ids, self.ple_table) * torch.tensor(self.ple_dim**0.5, dtype=dtype)
+        token_part = F.embedding(token_ids.to(self.ple_table.device), self.ple_table).to(self.device)
+        token_part = token_part * torch.tensor(self.ple_dim**0.5, dtype=dtype)
         token_part = token_part.reshape(*token_ids.shape, n_layers, self.ple_dim)
         context_part = F.linear(hidden, self.ple_projection) * self.config.hidden_size**-0.5
         context_part = context_part.reshape(*token_ids.shape, n_layers, self.ple_dim)
