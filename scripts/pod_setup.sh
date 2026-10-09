@@ -3,6 +3,8 @@
 #
 #   bash pod_setup.sh tracker                                # tracker + dashboard on port 8000
 #   bash pod_setup.sh peer google/gemma-4-31B-it 1:30 https://<tracker>   # serve layers 1-29
+#   bash pod_setup.sh client google/gemma-4-31B-it https://<tracker> google/gemma-4-31B-it-assistant
+#                                                            # client service on port 8001 (dashboard Ask box)
 #
 # Environment (all optional):
 #   MYRIAD_REPO     git URL of the code      (default: https://github.com/Delta025/myriad)
@@ -16,7 +18,7 @@
 # and a peer downloads only the tensors of its own layers.
 set -euo pipefail
 
-role=${1:?usage: pod_setup.sh tracker | peer MODEL START:END TRACKER_URL}
+role=${1:?usage: pod_setup.sh tracker | peer MODEL START:END TRACKER_URL | client MODEL TRACKER_URL [MTP_DRAFTER]}
 MYRIAD_REPO=${MYRIAD_REPO:-https://github.com/Delta025/myriad}
 MYRIAD_DIR=${MYRIAD_DIR:-/workspace/myriad}
 PEER_PORT=${PEER_PORT:-9000}
@@ -71,6 +73,13 @@ case "$role" in
     exec uv run --no-sync myriad -v peer "$model" --layers "$layers" --host 0.0.0.0 --port "$PEER_PORT" \
       --public-url "$PUBLIC_URL" --tracker "$tracker" --region "${REGION:-${RUNPOD_DC_ID:-$(hostname)}}" \
       --identity /workspace/node --node-name "${NODE_NAME:-$(hostname)}" --delay-ms "${DELAY_MS:-0}"
+    ;;
+  client)
+    model=${2:?model}; tracker=${3:?tracker URL}; drafter=${4:-}
+    # The client keeps layer 0 and the last two layers (which Gemma 4's MTP drafter reads).
+    exec uv run --no-sync myriad client-service "$model" --tracker "$tracker" --first-layers 1 --last-layers 2 \
+      ${drafter:+--mtp "$drafter"} --host 0.0.0.0 --port 8001 --identity /workspace/node \
+      --node-name "${NODE_NAME:-client}"
     ;;
   *)
     echo "unknown role: $role" >&2; exit 1

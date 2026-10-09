@@ -63,6 +63,14 @@
   .credit-row { display: grid; grid-template-columns: 90px 1fr 70px; gap: 8px; align-items: center; font-size: 12px; margin: 3px 0; }
   .credit-row .bar { height: 8px; border-radius: 2px; background: var(--accepted); }
   .credit-row .num { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ask { grid-column: 1 / -1; display: none; }
+  .ask form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .ask input[type=text] { flex: 1 1 320px; min-width: 0; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); font: inherit; }
+  .ask button { padding: 9px 18px; border-radius: 8px; border: 0; background: var(--accepted); color: #0b0d10; font: inherit; font-weight: 600; cursor: pointer; }
+  .ask button:disabled { opacity: .5; cursor: default; }
+  .ask label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .ask .status { margin-top: 8px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
   .queue { margin-top: 6px; font-size: 12px; color: var(--muted); }
   .queue b { color: var(--text); font-weight: 500; }
 </style>
@@ -75,6 +83,15 @@
   <span class="meta" id="peerCount"></span>
 </header>
 <main>
+  <section class="ask" id="ask">
+    <h2>Ask the swarm</h2>
+    <form id="askForm">
+      <input type="text" id="askPrompt" maxlength="2000" placeholder="Ask anything, e.g. Why do bees dance?" aria-label="Question" required>
+      <label><input type="checkbox" id="askSpec" checked> guess ahead</label>
+      <button type="submit" id="askButton">Ask</button>
+    </form>
+    <div class="status" id="askStatus"></div>
+  </section>
   <section>
     <h2>Request path</h2>
     <svg id="route" viewBox="0 0 720 300" width="100%" role="img" aria-label="Animated path of the latest request through the peers"></svg>
@@ -418,6 +435,40 @@ function connect() {
     if (old && e.type === "tokens") { addTokens(e, false); return; }
     handle(e);
   };
+}
+// ---------- ask box (needs ?client=<client service URL>, remembered in this browser) ----------
+function clientUrl() {
+  const fromQuery = new URLSearchParams(location.search).get("client");
+  try {
+    if (fromQuery) localStorage.setItem("myriadClient", fromQuery);
+    return fromQuery || localStorage.getItem("myriadClient");
+  } catch (e) { return fromQuery; }
+}
+const CLIENT = clientUrl();
+if (CLIENT) {
+  $("ask").style.display = "block";
+  $("askForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const prompt = $("askPrompt").value.trim();
+    if (!prompt) return;
+    const speculative = $("askSpec").checked;
+    $("askButton").disabled = true;
+    $("askStatus").textContent = "Thinking… the first words take a few seconds.";
+    try {
+      const r = await fetch(`${CLIENT.replace(/\/$/, "")}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, speculative, k: 2, max_tokens: 80 }),
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.detail || r.statusText);
+      const extra = body.acceptance != null ? `, ${Math.round(body.acceptance * 100)}% of guesses accepted` : "";
+      $("askStatus").textContent = `${body.tokens} words in ${body.seconds} s (${body.tok_s} words/s, ${body.mode}${extra})`;
+    } catch (e) {
+      $("askStatus").textContent = `Could not reach the client: ${e.message}`;
+    } finally {
+      $("askButton").disabled = false;
+    }
+  });
 }
 drawRoute();
 pollPeers();

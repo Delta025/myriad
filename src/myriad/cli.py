@@ -136,6 +136,19 @@ def run_generate(args) -> None:
     _print_hop_summary(forwards[1:])  # skip the prefill
 
 
+def run_client_service(args) -> None:
+    import uvicorn
+
+    from myriad.client.service import ClientService, create_app
+
+    identity, ledger = _node(args)
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    service = ClientService(args.model, args.tracker, args.first_layers, args.last_layers, args.mtp, device,
+                            identity, ledger, share_text=not args.no_share_text)
+    print(f"client service ready on port {args.port}", flush=True)
+    uvicorn.run(create_app(service), host=args.host, port=args.port, log_level="warning")
+
+
 def _print_hop_summary(events: list[dict]) -> None:
     if not events:
         return
@@ -207,6 +220,19 @@ def main(argv=None) -> None:
     _add_identity_options(p)
     p.add_argument("--start-at", type=float, help="wait until this Unix time before generating")
     p.set_defaults(func=run_generate)
+
+    p = sub.add_parser("client-service", help="serve a client over HTTP, for the dashboard's Ask box")
+    p.add_argument("model")
+    p.add_argument("--tracker", required=True)
+    p.add_argument("--first-layers", type=int, default=1)
+    p.add_argument("--last-layers", type=int, default=0)
+    p.add_argument("--mtp", help="Gemma 4 MTP drafter for speculative decoding (needs the target's last layers)")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=8001)
+    p.add_argument("--device", help="default: cuda if available")
+    p.add_argument("--no-share-text", action="store_true", help="don't send the generated text to the tracker")
+    _add_identity_options(p)
+    p.set_defaults(func=run_client_service)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(asctime)s %(name)s %(message)s")
