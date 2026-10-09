@@ -22,7 +22,10 @@ MYRIAD_DIR=${MYRIAD_DIR:-/workspace/myriad}
 PEER_PORT=${PEER_PORT:-9000}
 export HF_HOME=${HF_HOME:-/workspace/hf}
 export MYRIAD_CACHE=${MYRIAD_CACHE:-/workspace/myriad-cache}
-export UV_CACHE_DIR=${UV_CACHE_DIR:-/workspace/uv-cache}
+# uv's cache stays on the container disk: on some RunPod hosts, moving files inside a cache on the
+# /workspace volume fails with "Cross-device link" (the RunPod image points UV_CACHE_DIR there).
+export UV_CACHE_DIR=/root/.cache/uv
+export UV_LINK_MODE=copy
 
 if ! command -v uv >/dev/null; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
