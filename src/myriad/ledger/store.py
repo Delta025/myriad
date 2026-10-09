@@ -16,7 +16,13 @@ class Ledger:
         """`owner`: this node's public key."""
         self.owner = owner
         self._lock = threading.Lock()  # the peer's event loop and its client's thread share it
-        self._db = sqlite3.connect(str(path), check_same_thread=False)
+        self._db = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
+        # A peer writes a receipt on every forward call. With SQLite's default (rollback journal,
+        # synchronous=FULL) each commit waits for the disk: tens of ms per call on a pod's network
+        # volume. Write-ahead logging with synchronous=NORMAL commits by appending, stays safe on
+        # a crash, and syncs to disk at checkpoints instead.
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS receipts (
