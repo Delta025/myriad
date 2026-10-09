@@ -128,7 +128,9 @@ class ThreadedSwarm:
     protocol and code paths are the same.
     """
 
-    def __init__(self, checkpoint, split, model: str, dtype=torch.float32, delays_ms=None):
+    def __init__(self, checkpoint, split, model: str, dtype=torch.float32, delays_ms=None, identities=None,
+                 ledgers=None, unchoke: float = 0.2, device: str = "cpu"):
+        """`identities` and `ledgers` (one per peer, optional) let a test give peers a node identity."""
         import asyncio
         import socket
         import threading
@@ -156,9 +158,12 @@ class ThreadedSwarm:
 
         ckpt = Checkpoint(checkpoint)
         delays_ms = delays_ms or [0.0] * len(split)
+        identities = identities or [None] * len(split)
+        ledgers = ledgers or [None] * len(split)
         self.peers = [
-            PeerServer(Stage.from_checkpoint(ckpt, a, b, "cpu", dtype), model, region=f"r{i}", delay_ms=d)
-            for i, ((a, b), d) in enumerate(zip(split, delays_ms))
+            PeerServer(Stage.from_checkpoint(ckpt, a, b, device, dtype), model, region=f"r{i}", delay_ms=d,
+                       identity=identity, ledger=ledger, unchoke=unchoke)
+            for i, ((a, b), d, identity, ledger) in enumerate(zip(split, delays_ms, identities, ledgers))
         ]
         for peer in self.peers:
             self._tasks.append(asyncio.run_coroutine_threadsafe(peer.serve(tracker_url=self.tracker_url), self.loop))

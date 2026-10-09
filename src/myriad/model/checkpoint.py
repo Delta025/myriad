@@ -53,6 +53,10 @@ class Checkpoint:
         full = self.text_prefix + prefix
         return [n[len(self.text_prefix) :] for n in self._files if n.startswith(full)]
 
+    def rows(self, name: str) -> "LazyRows":
+        """A large 2-D tensor whose rows are read from disk only when asked for."""
+        return LazyRows(self._files[self.text_prefix + name], self.text_prefix + name)
+
     def load(
         self, names: Iterable[str], device: torch.device | str = "cpu", dtype: torch.dtype | None = None
     ) -> dict[str, torch.Tensor]:
@@ -70,3 +74,36 @@ class Checkpoint:
                         t = t.to(dtype)
                     tensors[name] = t.to(device)
         return tensors
+
+
+class LazyRows:
+    """Rows of a tensor in a safetensors file, read on demand with plain file reads.
+
+    E2B/E4B's per-layer-embedding table is 4-5 GiB, yet a token needs only its own
+    row. Reading rows from the (OS-cached) file keeps it out of the client's RAM.
+    It deliberately avoids memory-mapping: on Windows a mapping of the whole file
+    counts against the commit limit for as long as it stays open.
+    """
+
+    _DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
+
+    def __init__(self, file: Path, name: str):
+        self._file = open(file, "rb")
+        header_size = int.from_bytes(self._file.read(8), "little")
+        info = json.loads(self._file.read(header_size))[name]
+        self.dtype = self._DTYPES[info["dtype"]]
+        self.shape = tuple(info["shape"])
+        self._row_bytes = self.shape[1] * torch.tensor([], dtype=self.dtype).element_size()
+        self._base = 8 + header_size + info["data_offsets"][0]
+
+    def row(self, index: int) -> torch.Tensor:
+        self._file.seek(self._base + index * self._row_bytes)
+        return torch.frombuffer(bytearray(self._file.read(self._row_bytes)), dtype=self.dtype)
+
+    def __call__(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Rows for ``token_ids`` of any shape → ``[*token_ids.shape, row_size]``."""
+        flat = token_ids.reshape(-1).tolist()
+        unique = sorted(set(flat))
+        rows = torch.stack([self.row(i) for i in unique])
+        index = torch.tensor([unique.index(i) for i in flat])
+        return rows[index].reshape(*token_ids.shape, -1)

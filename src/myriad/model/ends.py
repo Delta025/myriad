@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from myriad.model.checkpoint import Checkpoint
+from myriad.model.checkpoint import Checkpoint, LazyRows
 
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -44,13 +44,16 @@ class Embedder(nn.Module):
 
     @classmethod
     def from_checkpoint(cls, checkpoint: Checkpoint, device="cpu", dtype=torch.bfloat16, ple_device=None) -> "Embedder":
-        """`ple_device` can keep the large per-layer-embedding table (4-5 GiB on E2B/E4B) in CPU RAM
-        while the rest runs on the GPU; only a few rows of it are read per token."""
+        """`ple_device` places the large per-layer-embedding table (4-5 GiB on E2B/E4B): a device such as
+        "cpu" while the rest runs on the GPU, or "disk" to read only the rows each token needs."""
         config = checkpoint.text_config()
         names = cls.weight_names(config)
         weights = checkpoint.load([n for n in names if n != "embed_tokens_per_layer.weight"], device, dtype)
         if "embed_tokens_per_layer.weight" in names:
-            weights |= checkpoint.load(["embed_tokens_per_layer.weight"], ple_device or device, dtype)
+            if ple_device == "disk":
+                weights["embed_tokens_per_layer.weight"] = checkpoint.rows("embed_tokens_per_layer.weight")
+            else:
+                weights |= checkpoint.load(["embed_tokens_per_layer.weight"], ple_device or device, dtype)
         return cls(config, weights)
 
     @property
@@ -74,7 +77,10 @@ class Embedder(nn.Module):
             return hidden, None
 
         n_layers = self.config.num_hidden_layers
-        token_part = F.embedding(token_ids.to(self.ple_table.device), self.ple_table).to(self.device)
+        if isinstance(self.ple_table, LazyRows):
+            token_part = self.ple_table(token_ids.cpu()).to(self.device, dtype)
+        else:
+            token_part = F.embedding(token_ids.to(self.ple_table.device), self.ple_table).to(self.device)
         token_part = token_part * torch.tensor(self.ple_dim**0.5, dtype=dtype)
         token_part = token_part.reshape(*token_ids.shape, n_layers, self.ple_dim)
         context_part = F.linear(hidden, self.ple_projection) * self.config.hidden_size**-0.5

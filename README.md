@@ -21,8 +21,8 @@ The first target is Gemma 4 31B split across GPUs in several regions. The draft 
 | Speculative decoding across the swarm | **Done.** Up to 1.97x faster under latency, same output |
 | Official Gemma 4 multi-token-prediction drafter | **Done.** Runs entirely on the client |
 | Live dashboard | **Done** |
-| Tit-for-tat credits | Next |
-| Multi-region deployment and benchmarks | Planned |
+| Tit-for-tat credits | **Done.** Signed receipts, local ledgers, contributors served first |
+| Multi-region deployment and benchmarks | Next |
 
 ### What works today
 
@@ -119,6 +119,26 @@ Add `--draft google/gemma-4-E2B-it --k 4` (or `--mtp <drafter> --last-layers <n>
 
 Each command runs in its own terminal, and peers can run on different machines (pass `--public-url` if a peer sits behind a proxy). On E2B and E4B, the last ~20 layers must be served by a single peer. `generate` prints the route, the text, and the median round trip and compute time of each hop.
 
+### Tit-for-tat credits
+
+Peers that contribute get served first, without a token or a blockchain:
+
+- **Identities and receipts.** Every node has an Ed25519 key, shared by its peer and its client. After each call, the peer returns a receipt saying which layers it ran, for how many positions, for which client. The peer signs it; the client checks that it describes exactly that call, and countersigns it with its next request. Both sides keep doubly signed records, as in Tribler's [TrustChain](https://doi.org/10.1016/j.future.2017.08.048). A peer that inflates its receipts is rejected.
+- **Local ledgers.** Each node keeps its own SQLite ledger of the receipts it is party to. There is no global ledger.
+- **Tit-for-tat queues.** When several requests wait for a peer's GPU, it first serves its own node's client, then requesters by how much work they have done for its node. One slot in five goes to a random waiting request (BitTorrent's "optimistic unchoke"), so newcomers and freeloaders still make progress.
+
+`scripts/tit_for_tat_demo.py` runs two contributing nodes (each serves half of Gemma 4 E2B as a separate process) and four freeloaders on one RTX 3080, all generating at once:
+
+| | First come, first served | Tit-for-tat |
+| --- | --- | --- |
+| Contributor: wait in peer queues | 52 ms | 26 ms |
+| Contributor: speed | 2.80 tok/s | 3.17 tok/s (1.13x) |
+| Freeloaders: speed (average) | 2.88 tok/s | 2.73 tok/s |
+
+The contributor's queueing time halves. The overall speed gain is smaller here because the clients share one machine and queueing is only part of each token's time. Freeloaders are slowed, not stopped.
+
+Use `--identity <dir> --node-name <name>` on `myriad peer` and `myriad generate` to give a node a persistent key and ledger.
+
 ### Dashboard
 
 The tracker serves a live dashboard at its root URL (for example http://127.0.0.1:8000/). It shows:
@@ -128,6 +148,7 @@ The tracker serves a live dashboard at its root URL (for example http://127.0.0.
 - tokens per second, acceptance rate and tokens per trip, with recent runs compared against plain decoding
 - the token stream, colored by draft tokens accepted, tokens corrected by the swarm, and bonus tokens
 - the peers with their region and GPU
+- each peer's credits: the work others have done for its node, and the order of its queue
 
 By default the client sends the tracker only counts and timings. Pass `--share-text` to `generate` to show the text too: whoever runs the tracker can then read the output.
 
@@ -151,10 +172,10 @@ uv run python scripts/bench_speculative.py google/gemma-4-E2B-it --draft google/
 src/myriad/
   model/      checkpoint loading, split rules, stages, KV cache, masks, embedding/head, pipelines
   client/     generation, sampling, speculative decoding, drafters, RemotePipeline (client side of a swarm)
-  peer/       peer server: one stage, one KV cache per session
+  peer/       peer server (one stage, one KV cache per session) and tit-for-tat scheduler
   tracker/    peer registry, route selection, event stream for the dashboard
   protocol/   wire messages (msgpack, raw tensor bytes)
-  ledger/     identities, receipts, credits (to come)
+  ledger/     Ed25519 identities, signed receipts, per-node SQLite ledger
   dashboard/  live web view, served by the tracker
   cli.py      `myriad tracker | peer | generate`
   testing.py  tiny random-weight Gemma 4 checkpoints, in-process test swarm

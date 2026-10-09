@@ -38,11 +38,15 @@ class PeerInfo(BaseModel):
     region: str = ""
     gpu: str = ""
     num_layers: int = 0  # layers in the whole model, for the dashboard's coverage bar
+    peer_key: str = ""  # the peer node's Ed25519 public key
+    name: str = ""  # self-declared, for display only
 
 
 class Heartbeat(BaseModel):
     peer_id: str
     sessions: int = 0
+    queue: list[str] = []  # names of requesters waiting, in the order the peer would serve them
+    credits: list[dict] = []  # the peer's own view: work received from / given to each counterparty
 
 
 class Tracker:
@@ -98,7 +102,8 @@ def create_app(tracker: Tracker | None = None) -> FastAPI:
 
     @app.post("/register")
     async def register(info: PeerInfo):
-        tracker.peers[info.peer_id] = info.model_dump() | {"last_seen": time.time(), "sessions": 0}
+        tracker.peers[info.peer_id] = info.model_dump() | {"last_seen": time.time(), "sessions": 0, "queue": [],
+                                                           "credits": []}
         tracker.publish([{"type": "peer_joined", "time": time.time(), **info.model_dump()}])
         return {"ok": True}
 
@@ -107,7 +112,7 @@ def create_app(tracker: Tracker | None = None) -> FastAPI:
         peer = tracker.peers.get(beat.peer_id)
         if peer is None:
             raise HTTPException(404, "unknown peer; register again")
-        peer["last_seen"], peer["sessions"] = time.time(), beat.sessions
+        peer.update(last_seen=time.time(), sessions=beat.sessions, queue=beat.queue, credits=beat.credits)
         return {"ok": True}
 
     @app.get("/peers")

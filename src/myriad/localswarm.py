@@ -21,7 +21,9 @@ def _port_in_use(port: int) -> bool:
 
 
 class LocalSwarm:
-    def __init__(self, model: str, split: list[tuple[int, int]], log_dir: Path, delay_ms: float = 0.0, timeout: float = 300):
+    def __init__(self, model: str, split: list[tuple[int, int]], log_dir: Path, delay_ms: float = 0.0, timeout: float = 300,
+                 peer_args: list[list[str]] | None = None):
+        """`peer_args`: extra `myriad peer` arguments for each peer, e.g. its --identity."""
         ports = [TRACKER_PORT, *(FIRST_PEER_PORT + i for i in range(len(split)))]
         if busy := [port for port in ports if _port_in_use(port)]:
             # Most likely a swarm left behind by a crashed run; using it by accident would skew results.
@@ -35,11 +37,12 @@ class LocalSwarm:
             self.procs.append(subprocess.Popen(cli + args, stdout=log, stderr=subprocess.STDOUT))
 
         launch("tracker", ["tracker", "--host", "127.0.0.1", "--port", str(TRACKER_PORT)])
-        for i, (a, b) in enumerate(split):
+        peer_args = peer_args or [[] for _ in split]
+        for i, ((a, b), extra) in enumerate(zip(split, peer_args)):
             launch(
                 f"peer{i}",
                 ["-v", "peer", model, "--layers", f"{a}:{b}", "--host", "127.0.0.1", "--port", str(FIRST_PEER_PORT + i),
-                 "--tracker", TRACKER_URL, "--region", f"local-{i}", "--delay-ms", str(delay_ms)],
+                 "--tracker", TRACKER_URL, "--region", f"local-{i}", "--delay-ms", str(delay_ms), *extra],
             )
 
         deadline = time.monotonic() + timeout

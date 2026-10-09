@@ -103,3 +103,15 @@ def test_start_pos_gap_is_rejected(tiny_checkpoint):
     pipe.forward(tokens(3), start_pos=0)
     with pytest.raises(ValueError):
         pipe.forward(tokens(1), start_pos=5)
+
+
+def test_per_layer_embeddings_read_from_disk_match(tiny_checkpoint):
+    from myriad.model.ends import Embedder
+
+    ckpt = Checkpoint(tiny_checkpoint)
+    if not ckpt.text_config().hidden_size_per_layer_input:
+        pytest.skip("no per-layer embeddings")
+    ids = torch.tensor([[5, 9, 5, 300, 0]])
+    in_memory = Embedder.from_checkpoint(ckpt, "cpu", torch.float32)(ids)
+    from_disk = Embedder.from_checkpoint(ckpt, "cpu", torch.float32, ple_device="disk")(ids)
+    assert torch.equal(in_memory[0], from_disk[0]) and torch.equal(in_memory[1], from_disk[1])

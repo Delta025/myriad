@@ -23,6 +23,26 @@ def _layers(text: str) -> tuple[int, int]:
     return int(start), int(end)
 
 
+def _node(args):
+    """The node's identity and ledger: persistent with --identity DIR, otherwise fresh and in memory."""
+    from pathlib import Path
+
+    from myriad.ledger.identity import Identity
+    from myriad.ledger.store import Ledger
+
+    if args.identity:
+        directory = Path(args.identity).expanduser()
+        identity = Identity.load_or_create(directory, args.node_name)
+        return identity, Ledger(identity.public_key, directory / "ledger.sqlite")
+    identity = Identity.generate(args.node_name)
+    return identity, Ledger(identity.public_key)
+
+
+def _add_identity_options(p) -> None:
+    p.add_argument("--identity", help="directory holding this node's key and ledger (shared by its peer and client)")
+    p.add_argument("--node-name", default="", help="display name for this node (self-declared)")
+
+
 def run_tracker(args) -> None:
     import uvicorn
 
@@ -40,7 +60,11 @@ def run_peer(args) -> None:
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     stage = Stage.from_checkpoint(Checkpoint(args.model), start, end, device, DTYPES[args.dtype])
     gpu = torch.cuda.get_device_name(0) if device.startswith("cuda") else "cpu"
-    server = PeerServer(stage, args.name or args.model, region=args.region, delay_ms=args.delay_ms)
+    identity, ledger = _node(args)
+    server = PeerServer(stage, args.name or args.model, region=args.region, delay_ms=args.delay_ms,
+                        identity=identity, ledger=ledger, unchoke=args.unchoke)
+    if args.first_come_first_served:
+        server.scheduler.score = lambda requester: 0.0  # baseline for comparisons; receipts are still kept
     asyncio.run(server.serve(args.host, args.port, args.public_url, args.tracker, gpu))
 
 
@@ -58,9 +82,11 @@ def run_generate(args) -> None:
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = Checkpoint(args.model)
+    identity, ledger = _node(args)
     pipe = RemotePipeline.connect(
         checkpoint, args.tracker, model=args.name or args.model, first_layers=args.first_layers,
         last_layers=args.last_layers, dtype=DTYPES[args.dtype], stage_device=device, ends_device=args.ends_device,
+        identity=identity, ledger=ledger,
     )
     drafter = None
     if args.draft:
@@ -84,6 +110,8 @@ def run_generate(args) -> None:
     with pipe:
         eos = GenerationConfig.from_pretrained(checkpoint.path).eos_token_id
         stop = eos if isinstance(eos, list) else [eos]
+        if args.start_at:  # lets several clients start together, for comparisons under load
+            time.sleep(max(0.0, args.start_at - time.time()))
         t = time.perf_counter()
         stats = None
         if drafter is None:
@@ -143,6 +171,10 @@ def main(argv=None) -> None:
     p.add_argument("--delay-ms", type=float, default=0.0, help="simulated round-trip latency added to every reply")
     p.add_argument("--device", help="default: cuda if available")
     p.add_argument("--dtype", choices=DTYPES, default="bfloat16")
+    p.add_argument("--unchoke", type=float, default=0.2, help="share of slots given to a random waiting request")
+    p.add_argument("--first-come-first-served", action="store_true",
+                   help="ignore credits when ordering requests (a baseline for comparison)")
+    _add_identity_options(p)
     p.set_defaults(func=run_peer)
 
     p = sub.add_parser("generate", help="generate text through the swarm")
@@ -172,6 +204,8 @@ def main(argv=None) -> None:
         "--share-text", action="store_true",
         help="send the generated text to the tracker so the dashboard can show it (off by default)",
     )
+    _add_identity_options(p)
+    p.add_argument("--start-at", type=float, help="wait until this Unix time before generating")
     p.set_defaults(func=run_generate)
 
     args = parser.parse_args(argv)

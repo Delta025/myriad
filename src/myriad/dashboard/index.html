@@ -57,6 +57,14 @@
   td { padding: 5px 6px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .tablewrap { overflow-x: auto; }
   .empty { color: var(--faint); padding: 18px 0; text-align: center; }
+  .credits { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .credit-card { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
+  .credit-card h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .credit-row { display: grid; grid-template-columns: 90px 1fr 70px; gap: 8px; align-items: center; font-size: 12px; margin: 3px 0; }
+  .credit-row .bar { height: 8px; border-radius: 2px; background: var(--accepted); }
+  .credit-row .num { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .queue { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .queue b { color: var(--text); font-weight: 500; }
 </style>
 </head>
 <body>
@@ -108,6 +116,13 @@
         <tbody id="peers"><tr><td colspan="6" class="empty">no peers registered</td></tr></tbody>
       </table>
     </div>
+  </section>
+
+  <section style="grid-column: 1 / -1">
+    <h2>Credits (tit-for-tat)</h2>
+    <div class="hint" style="margin-bottom:8px">Each peer's own ledger: work others have done for its node (from signed receipts),
+      and the order it would serve the requests waiting now. Contributors go first; one slot in five goes to a random request.</div>
+    <div id="credits" class="credits"><div class="empty">no credit data yet</div></div>
   </section>
 </main>
 
@@ -247,7 +262,33 @@ async function pollPeers() {
     if (S.peers.length) $("model").textContent = S.peers[0].model;
     renderPeers();
     drawCoverage();
+    renderCredits();
   } catch (e) { /* tracker restarting */ }
+}
+function renderCredits() {
+  const box = $("credits");
+  const peers = S.peers.filter((p) => (p.credits && p.credits.length) || (p.queue && p.queue.length));
+  box.replaceChildren();
+  if (!peers.length) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "no credit data yet"; box.appendChild(d); return; }
+  for (const p of peers) {
+    const card = document.createElement("div"); card.className = "credit-card";
+    const h = document.createElement("h3"); h.textContent = `${p.name || p.peer_id} (layers ${p.start}–${p.end - 1})`; card.appendChild(h);
+    const max = Math.max(1, ...p.credits.map((c) => c.received));
+    for (const c of p.credits) {
+      const row = document.createElement("div"); row.className = "credit-row";
+      const name = document.createElement("span"); name.textContent = c.name;
+      const track = document.createElement("div"); const bar = document.createElement("div");
+      bar.className = "bar"; bar.style.width = `${(100 * c.received) / max}%`; track.appendChild(bar);
+      const num = document.createElement("span"); num.className = "num"; num.textContent = c.received.toLocaleString();
+      num.title = `work received from ${c.name}; given to them: ${c.given.toLocaleString()} layer-positions`;
+      row.append(name, track, num); card.appendChild(row);
+    }
+    const q = document.createElement("div"); q.className = "queue";
+    q.append("Queue: ");
+    const b = document.createElement("b"); b.textContent = p.queue && p.queue.length ? p.queue.join(" → ") : "empty"; q.appendChild(b);
+    card.appendChild(q);
+    box.appendChild(card);
+  }
 }
 function renderPeers() {
   const body = $("peers");

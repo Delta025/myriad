@@ -18,6 +18,8 @@ import httpx
 import torch
 from websockets.sync.client import connect
 
+from myriad.ledger.identity import Identity, Receipt, verify
+from myriad.ledger.store import Ledger
 from myriad.model.checkpoint import Checkpoint
 from myriad.model.ends import Embedder, Head
 from myriad.model.kv import KVCache
@@ -49,6 +51,8 @@ class PeerLink:
             raise PeerError(f"{url} speaks protocol {info['protocol']}, expected {PROTOCOL_VERSION}")
         self.peer_id, self.model, self.region = info["peer_id"], info["model"], info["region"]
         self.start, self.end = info["start"], info["end"]
+        self.peer_key, self.name = info["peer_key"], info["name"]
+        self.pending_ack: dict | None = None  # countersignature of the last receipt, sent with the next request
 
     def call(self, request: dict) -> dict:
         self._next_id += 1
@@ -109,14 +113,18 @@ class RemotePipeline:
         last: Stage | None,
         peers: list[PeerLink],
         events: EventSink | None = None,
-        client_id: str | None = None,
+        identity: Identity | None = None,
+        ledger: Ledger | None = None,
     ):
+        """`identity` and `ledger` are the node's; a node that also runs a peer passes the same ones there."""
         self.embedder, self.head = embedder, head
         self.first = _LocalPart(first) if first is not None else None
         self.last = _LocalPart(last) if last is not None else None
         self.peers = peers
         self.events = events or EventSink(None)
-        self.client_id = client_id or uuid.uuid4().hex[:8]
+        self.identity = identity or Identity.generate()
+        self.ledger = ledger
+        self.client_id = self.identity.public_key[:8]
         self.session = uuid.uuid4().hex
         self.length = 0
         self.last_hidden: torch.Tensor | None = None
@@ -131,17 +139,23 @@ class RemotePipeline:
         validate_split(config, split)
 
         for peer in peers:
-            peer.call({"type": "open_session", "session": self.session, "client_id": self.client_id})
+            peer.call({"type": "open_session", "session": self.session, "client_id": self.identity.public_key,
+                       "name": self.identity.name})
+            if self.ledger is not None:
+                self.ledger.set_name(peer.peer_key, peer.name)
 
     @staticmethod
     def load_client_parts(
         checkpoint: Checkpoint, first_layers: int = 1, last_layers: int = 0, dtype: torch.dtype = torch.bfloat16,
-        stage_device: str = "cpu", ends_device: str = "cpu",
+        stage_device: str = "cpu", ends_device: str = "cpu", ple_device: str | None = "disk",
     ) -> dict:
-        """Load what the client runs itself: embedding, head, and its first and last layers."""
+        """Load what the client runs itself: embedding, head, and its first and last layers.
+
+        E2B/E4B's per-layer-embedding table is read from disk row by row by default (see `Embedder`).
+        """
         n_layers = checkpoint.text_config().num_hidden_layers
         start, end = first_layers, n_layers - last_layers
-        embedder = Embedder.from_checkpoint(checkpoint, ends_device, dtype)
+        embedder = Embedder.from_checkpoint(checkpoint, ends_device, dtype, ple_device)
         return dict(
             embedder=embedder,
             head=Head.from_checkpoint(checkpoint, ends_device, dtype, embedder=embedder),
@@ -161,6 +175,8 @@ class RemotePipeline:
         stage_device: str = "cpu",
         ends_device: str = "cpu",
         parts: dict | None = None,
+        identity: Identity | None = None,
+        ledger: Ledger | None = None,
     ) -> "RemotePipeline":
         """Load the client's parts of `checkpoint` and ask the tracker for peers covering the rest.
 
@@ -181,10 +197,11 @@ class RemotePipeline:
             raise PeerError(route.json()["detail"])
         route.raise_for_status()
 
-        client_id = uuid.uuid4().hex[:8]
-        peers = [PeerLink(hop["url"], client_id) for hop in route.json()]
+        identity = identity or Identity.generate()
+        peers = [PeerLink(hop["url"], identity.public_key) for hop in route.json()]
         parts = parts or cls.load_client_parts(checkpoint, first_layers, last_layers, dtype, stage_device, ends_device)
-        return cls(parts["embedder"], parts["head"], parts["first"], parts["last"], peers, EventSink(tracker_url), client_id)
+        return cls(parts["embedder"], parts["head"], parts["first"], parts["last"], peers, EventSink(tracker_url),
+                   identity, ledger)
 
     def forward(self, token_ids, start_pos: int) -> torch.Tensor:
         if start_pos > self.length:
@@ -206,8 +223,11 @@ class RemotePipeline:
             request = {"type": "forward", "session": self.session, "start_pos": start_pos, "hidden": hidden.cpu()}
             if per_layer_inputs is not None:
                 request["per_layer_inputs"] = stage_inputs(peer.start, peer.end).cpu()
+            if peer.pending_ack is not None:
+                request["ack"], peer.pending_ack = peer.pending_ack, None
             reply = peer.call(request)
             hidden = reply["hidden"]
+            self._accept_receipt(peer, reply, ids.shape[1])
             hops.append(
                 {
                     "peer_id": peer.peer_id,
@@ -240,6 +260,18 @@ class RemotePipeline:
             }
         )
         return logits
+
+    def _accept_receipt(self, peer: PeerLink, reply: dict, positions: int) -> None:
+        """Check the peer's signed receipt describes exactly this call, record it, and countersign it."""
+        receipt = Receipt.from_dict(reply["receipt"])
+        expected = (peer.peer_key, self.identity.public_key, self.session, peer.start, peer.end, positions)
+        actual = (receipt.peer, receipt.client, receipt.session, receipt.start, receipt.end, receipt.positions)
+        if actual != expected or not verify(peer.peer_key, reply["sig"], receipt.payload()):
+            raise PeerError(f"{peer.url}: invalid receipt {receipt}")
+        countersignature = self.identity.sign(receipt.payload())
+        if self.ledger is not None:
+            self.ledger.record(receipt, reply["sig"], countersignature)
+        peer.pending_ack = {"seq": receipt.seq, "sig": countersignature}
 
     def truncate(self, length: int) -> None:
         for part in (self.first, self.last):
