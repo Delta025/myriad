@@ -25,9 +25,6 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-markers = [
-    "gpu: needs a CUDA GPU and real model weights (deselect with -m 'not gpu')",
-]
 
 # On Windows, PyPI only ships CPU torch; pull the CUDA build instead.
 # On Linux (rented GPUs), the default PyPI wheel already includes CUDA.
