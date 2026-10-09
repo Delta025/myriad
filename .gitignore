@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+# model weights and generated fixtures
+*.safetensors
+/weights/
+/fixtures/
+.env

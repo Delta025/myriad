@@ -1,0 +1,40 @@
+[project]
+name = "myriad"
+version = "0.1.0"
+description = "Peer-to-peer LLM inference across consumer GPUs, with speculative decoding and tit-for-tat credits"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch>=2.14",
+    "transformers>=5.19",
+    "safetensors>=0.6",
+    "huggingface-hub>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gpu: needs a CUDA GPU and real model weights (deselect with -m 'not gpu')",
+]
+
+# On Windows, PyPI only ships CPU torch; pull the CUDA build instead.
+# On Linux (rented GPUs), the default PyPI wheel already includes CUDA.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
